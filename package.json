@@ -10,6 +10,7 @@
     "node": "18.x"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "firebase-admin": "^11.12.0"
   }
 }
