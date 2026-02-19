@@ -1,15 +1,23 @@
+// server.js – Fertig für Render
+
 import express from "express";
+import cors from "cors";  // <-- für CORS
 
 const app = express();
+
+// ----- Middleware -----
+app.use(cors());        // erlaubt Fetch von localhost / anderer Domains
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ----- Devices Map -----
+// ----- Geräte-Map -----
 const devices = new Map();
 
 // ----- Test-Route -----
-app.get("/", (req, res) => res.json({ status: "Server läuft!" }));
+app.get("/", (req, res) => {
+  res.json({ status: "Server läuft!" });
+});
 
 // ----- POST: Standort aktualisieren -----
 app.post("/location/update", (req, res) => {
@@ -43,4 +51,6 @@ app.get("/devices", (req, res) => {
 });
 
 // ----- Server starten -----
-app.listen(PORT, () => console.log(`Server läuft auf Port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server läuft auf Port ${PORT}`);
+});
