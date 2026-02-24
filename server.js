@@ -19,6 +19,7 @@ let db;
       name TEXT, timestamp INTEGER, alarmActive INTEGER DEFAULT 0, isAwake INTEGER DEFAULT 1
     )
   `);
+  console.log("SQLite Datenbank bereit.");
 })();
 
 const watchers = new Map();
@@ -27,11 +28,11 @@ let lastAppActivity = 0;
 const isAppActive = () => (Date.now() - lastAppActivity) < 60000;
 
 app.post("/location/update", async (req, res) => {
-  const { deviceId, lat, lon } = req.body;
+  const { deviceId, lat, lon, speed, battery, accuracy, name } = req.body;
   if (!deviceId) return res.sendStatus(400);
 
   const existing = await db.get("SELECT isAwake, alarmActive FROM devices WHERE deviceId = ?", [deviceId]);
-  const currentAwake = existing ? existing.isAwake : 1; // Neue Geräte starten WACH
+  const currentAwake = existing ? existing.isAwake : 1;
   const currentAlarm = existing ? existing.alarmActive : 0;
 
   await db.run(`
@@ -41,7 +42,7 @@ app.post("/location/update", async (req, res) => {
       lat=excluded.lat, lon=excluded.lon, speed=excluded.speed, 
       battery=excluded.battery, accuracy=excluded.accuracy, 
       name=excluded.name, timestamp=excluded.timestamp
-  `, [deviceId, lat, lon, req.body.speed, req.body.battery, req.body.accuracy, req.body.name, Date.now(), currentAwake, currentAlarm]);
+  `, [deviceId, lat, lon, speed, battery, accuracy, name, Date.now(), currentAwake, currentAlarm]);
 
   res.json({ status: "ok" });
 });
@@ -49,6 +50,7 @@ app.post("/location/update", async (req, res) => {
 app.post("/devices/wakeup-all", async (req, res) => {
   lastAppActivity = Date.now();
   await db.run("UPDATE devices SET isAwake = 1");
+  console.log("App Start: Alle Geräte geweckt.");
   res.json({ status: "all awake" });
 });
 
@@ -72,9 +74,16 @@ app.post("/devices/:id/unwatch", (req, res) => {
 app.get("/devices/:id", async (req, res) => {
   const device = await db.get("SELECT * FROM devices WHERE deviceId = ?", [req.params.id]);
   if (!device) return res.status(404).send("Not found");
+  
   const isWatched = watchers.has(device.deviceId) && watchers.get(device.deviceId).size > 0;
   const effectiveAwake = (device.isAwake && isAppActive()) || isWatched;
-  res.json({ ...device, alarmActive: !!device.alarmActive, isAwake: !!effectiveAwake, isWatched });
+
+  res.json({ 
+    ...device, 
+    alarmActive: !!device.alarmActive, 
+    isAwake: !!effectiveAwake, 
+    isWatched: !!isWatched 
+  });
 });
 
 app.get("/devices", async (req, res) => {
@@ -84,10 +93,19 @@ app.get("/devices", async (req, res) => {
   res.json(rows.map(d => ({
     ...d,
     alarmActive: !!d.alarmActive,
-    isAwake: !!((d.isAwake && isAppActive()) || (watchers.has(d.deviceId) && watchers.get(d.deviceId).size > 0)),
     isWatched: watchers.has(d.deviceId) && watchers.get(d.deviceId).size > 0,
     status: (now - d.timestamp < 65000) ? "online" : "offline"
   })));
+});
+
+app.post("/devices/:id/ring", async (req, res) => {
+  await db.run("UPDATE devices SET alarmActive = 1 WHERE deviceId = ?", [req.params.id]);
+  res.sendStatus(200);
+});
+
+app.post("/devices/:id/reset-alarm", async (req, res) => {
+  await db.run("UPDATE devices SET alarmActive = 0 WHERE deviceId = ?", [req.params.id]);
+  res.sendStatus(200);
 });
 
 app.listen(PORT, () => console.log(`Server läuft auf Port ${PORT}`));
