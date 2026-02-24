@@ -1,4 +1,4 @@
-// server.js – Vollständig kompatibel mit der Android-App inkl. Sleep-Modus
+// server.js – Vollständig kompatibel mit der Android-App (inkl. Sleep & Ghost Mode)
 import express from "express";
 import cors from "cors";
 
@@ -8,12 +8,16 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Hier werden die Daten gespeichert (im Arbeitsspeicher)
+// Hier werden die Gerätedaten gespeichert
 const devices = new Map();
 
-app.get("/", (req, res) => res.json({ status: "Server läuft!" }));
+// Verfolgt, wer gerade wen ansieht (Ghost Mode Logik)
+// Key: deviceId (Ziel), Value: Set von deviceIds (Beobachter)
+const watchers = new Map();
 
-// 1. STANDORT-UPDATE (Empfängt alle Daten vom Handy)
+app.get("/", (req, res) => res.json({ status: "Server läuft!", activeDevices: devices.size }));
+
+// 1. STANDORT-UPDATE
 app.post("/location/update", (req, res) => {
   const { deviceId, lat, lon, speed, battery, name, accuracy } = req.body;
 
@@ -21,7 +25,7 @@ app.post("/location/update", (req, res) => {
     return res.status(400).json({ error: "Invalid payload" });
   }
 
-  // Bestehende Daten behalten (isAwake, alarmActive), falls vorhanden
+  // Bestehende Zustände (Sleep/Alarm) beibehalten
   const existing = devices.get(deviceId) || { alarmActive: false, isAwake: true };
 
   devices.set(deviceId, {
@@ -40,7 +44,7 @@ app.post("/location/update", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// 2. ALLE GERÄTE AUFWECKEN (Wird beim App-Start oder "Zoom All" gerufen)
+// 2. ALLE GERÄTE AUFWECKEN (Bei App-Start)
 app.post("/devices/wakeup-all", (req, res) => {
   console.log("Wecke alle Geräte auf...");
   for (let [id, device] of devices) {
@@ -50,58 +54,88 @@ app.post("/devices/wakeup-all", (req, res) => {
   res.json({ status: "all awake" });
 });
 
-// 3. EINZELNES GERÄT SCHLAFEN LEGEN (Wird nach 10s Inaktivität gerufen)
+// 3. GERÄT SCHLAFEN LEGEN
 app.post("/devices/:id/sleep", (req, res) => {
   const deviceId = req.params.id;
   const device = devices.get(deviceId);
   if (device) {
     device.isAwake = false;
     devices.set(deviceId, device);
-    console.log(`Sleep Mode aktiviert für: ${deviceId}`);
+    console.log(`Sleep Mode: ${deviceId}`);
     res.json({ status: "sleeping" });
   } else {
     res.status(404).json({ error: "Device not found" });
   }
 });
 
-// 4. ALARM AUSLÖSEN
-app.post("/devices/:id/ring", (req, res) => {
-  const deviceId = req.params.id;
-  const device = devices.get(deviceId) || { deviceId, isAwake: true };
-  device.alarmActive = true;
-  devices.set(deviceId, device);
-  console.log(`Alarm aktiviert für: ${deviceId}`);
-  res.json({ status: "alarm activated" });
+// 4. BEOBACHTUNG STARTEN (Wenn ich einen Marker anklicke)
+app.post("/devices/:id/watch", (req, res) => {
+  const targetId = req.params.id;
+  const watcherId = req.query.watcherId;
+  
+  if (!watchers.has(targetId)) {
+    watchers.set(targetId, new Set());
+  }
+  watchers.get(targetId).add(watcherId);
+  
+  console.log(`Gerät ${watcherId} beobachtet jetzt ${targetId}`);
+  res.json({ status: "watching" });
 });
 
-// 5. ALARM ZURÜCKSETZEN
-app.post("/devices/:id/reset-alarm", (req, res) => {
+// 5. BEOBACHTUNG STOPPEN
+app.post("/devices/:id/unwatch", (req, res) => {
+  const targetId = req.params.id;
+  const watcherId = req.query.watcherId;
+  
+  if (watchers.has(targetId)) {
+    watchers.get(targetId).delete(watcherId);
+  }
+  
+  res.json({ status: "unwatched" });
+});
+
+// 6. EINZEL-STATUS PRÜFEN (Wird alle 6s vom Handy gerufen)
+app.get("/devices/:id", (req, res) => {
   const deviceId = req.params.id;
   const device = devices.get(deviceId);
-  if (device) {
-    device.alarmActive = false;
-    devices.set(deviceId, device);
-  }
-  console.log(`Alarm deaktiviert für: ${deviceId}`);
-  res.json({ status: "alarm reset" });
-});
-
-// 6. EINZELNES GERÄT PRÜFEN (Abfrage vom Handy: "Soll ich aufwachen/schlafen/klingeln?")
-app.get("/devices/:id", (req, res) => {
-  const device = devices.get(req.params.id);
+  
   if (!device) return res.status(404).json({ error: "Not found" });
-  res.json(device);
+
+  // Prüfen, ob gerade jemand dieses Gerät ansieht
+  const isWatched = watchers.has(deviceId) && watchers.get(deviceId).size > 0;
+
+  res.json({
+    ...device,
+    isWatched: isWatched
+  });
 });
 
-// 7. LISTE ALLER GERÄTE (Für die Kartenanzeige)
+// 7. LISTE ALLER GERÄTE (Für die Karte)
 app.get("/devices", (req, res) => {
   const now = Date.now();
   const list = Array.from(devices.values()).map(d => ({
     ...d,
-    // Offline markieren, wenn länger als 60s kein Update kam
-    status: (now - d.timestamp < 60000) ? "online" : "offline"
+    status: (now - d.timestamp < 60000) ? "online" : "offline",
+    isWatched: watchers.has(d.deviceId) && watchers.get(d.deviceId).size > 0
   }));
   res.json(list);
+});
+
+// 8. ALARM ENDPUNKTE
+app.post("/devices/:id/ring", (req, res) => {
+  const device = devices.get(req.params.id) || { deviceId: req.params.id, isAwake: true };
+  device.alarmActive = true;
+  devices.set(req.params.id, device);
+  res.json({ status: "alarm activated" });
+});
+
+app.post("/devices/:id/reset-alarm", (req, res) => {
+  const device = devices.get(req.params.id);
+  if (device) {
+    device.alarmActive = false;
+    devices.set(req.params.id, device);
+  }
+  res.json({ status: "alarm reset" });
 });
 
 app.listen(PORT, () => console.log(`Server läuft auf Port ${PORT}`));
