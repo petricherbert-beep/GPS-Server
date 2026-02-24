@@ -1,6 +1,8 @@
-// server.js – Vollständig optimierte Version mit Auto-Sleep & Ghost Mode
+// server.js – SQLite Version mit Auto-Sleep & Ghost Mode
 import express from "express";
 import cors from "cors";
+import sqlite3 from "sqlite3";
+import { open } from "sqlite";
 
 const app = express();
 app.use(cors());
@@ -8,151 +10,113 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Datenspeicher im RAM
-const devices = new Map();
-const watchers = new Map(); // Wer beobachtet wen?
+// Datenbank initialisieren
+let db;
+(async () => {
+  db = await open({
+    filename: "./database.db",
+    driver: sqlite3.Database
+  });
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS devices (
+      deviceId TEXT PRIMARY KEY,
+      lat REAL,
+      lon REAL,
+      speed REAL,
+      battery INTEGER,
+      accuracy REAL,
+      name TEXT,
+      timestamp INTEGER,
+      alarmActive INTEGER DEFAULT 0,
+      isAwake INTEGER DEFAULT 0
+    )
+  `);
+})();
 
-// Zeitstempel der letzten Map-Aktivität
+// Wer beobachtet wen? (Flüchtig im RAM okay)
+const watchers = new Map();
 let lastAppActivity = 0;
 
-app.get("/", (req, res) => {
-  res.json({ 
-    status: "Server läuft!", 
-    activeDevices: devices.size,
-    appActive: (Date.now() - lastAppActivity) < 65000 
-  });
-});
+app.get("/", (req, res) => res.json({ status: "Server läuft!", appActive: (Date.now() - lastAppActivity) < 65000 }));
 
-// 1. STANDORT-UPDATE (Vom Handy gesendet)
-app.post("/location/update", (req, res) => {
-  const { deviceId, lat, lon } = req.body;
+// 1. STANDORT-UPDATE
+app.post("/location/update", async (req, res) => {
+  const { deviceId, lat, lon, speed, battery, name, accuracy } = req.body;
+  if (!deviceId) return res.status(400).send("No ID");
 
-  if (!deviceId || lat == null || lon == null) {
-    return res.status(400).json({ error: "Invalid payload" });
-  }
-
-  // Bestehende Zustände (Alarm/Basis-Status) behalten
-  const existing = devices.get(deviceId) || { 
-    alarmActive: false, 
-    isAwake: false // Neue Geräte starten standardmäßig im Sleep Mode
-  };
-
-  devices.set(deviceId, {
-    ...existing,
-    ...req.body,
-    timestamp: Date.now(),
-    status: "online"
-  });
+  await db.run(`
+    INSERT INTO devices (deviceId, lat, lon, speed, battery, accuracy, name, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(deviceId) DO UPDATE SET
+      lat=excluded.lat, lon=excluded.lon, speed=excluded.speed, 
+      battery=excluded.battery, accuracy=excluded.accuracy, 
+      name=excluded.name, timestamp=excluded.timestamp
+  `, [deviceId, lat, lon, speed, battery, accuracy, name, Date.now()]);
 
   res.json({ status: "ok" });
 });
 
-// 2. ALLE AUFWECKEN (Wird beim App-Start gerufen)
-app.post("/devices/wakeup-all", (req, res) => {
-  console.log("App wurde geöffnet: Wecke alle Geräte auf.");
+// 2. ALLE AUFWECKEN
+app.post("/devices/wakeup-all", async (req, res) => {
   lastAppActivity = Date.now();
-  
-  for (let [id, device] of devices) {
-    device.isAwake = true;
-    devices.set(id, device);
-  }
+  await db.run("UPDATE devices SET isAwake = 1");
   res.json({ status: "all awake" });
 });
 
-// 3. EINZEL-GERÄT SCHLAFEN LEGEN
-app.post("/devices/:id/sleep", (req, res) => {
-  const deviceId = req.params.id;
-  const device = devices.get(deviceId);
-  if (device) {
-    device.isAwake = false;
-    devices.set(deviceId, device);
-    res.json({ status: "sleeping" });
-  } else {
-    res.status(404).json({ error: "Device not found" });
-  }
+// 3. EINZEL-GERÄT SCHLAFEN
+app.post("/devices/:id/sleep", async (req, res) => {
+  await db.run("UPDATE devices SET isAwake = 0 WHERE deviceId = ?", [req.params.id]);
+  res.json({ status: "sleeping" });
 });
 
-// 4. BEOBACHTUNG STARTEN (Marker ausgewählt)
+// 4. BEOBACHTUNG (Ghost Mode Logic)
 app.post("/devices/:id/watch", (req, res) => {
   const targetId = req.params.id;
   const watcherId = req.query.watcherId;
-  
-  if (!watchers.has(targetId)) {
-    watchers.set(targetId, new Set());
-  }
+  if (!watchers.has(targetId)) watchers.set(targetId, new Set());
   watchers.get(targetId).add(watcherId);
-  
-  console.log(`${watcherId} beobachtet jetzt ${targetId}`);
   res.json({ status: "watching" });
 });
 
-// 5. BEOBACHTUNG STOPPEN
 app.post("/devices/:id/unwatch", (req, res) => {
-  const targetId = req.params.id;
-  const watcherId = req.query.watcherId;
-  
-  if (watchers.has(targetId)) {
-    watchers.get(targetId).delete(watcherId);
-  }
+  if (watchers.has(req.params.id)) watchers.get(req.params.id).delete(req.query.watcherId);
   res.json({ status: "unwatched" });
 });
 
-// 6. STATUS-CHECK (Wird alle 6s vom Handy-Service gerufen)
-app.get("/devices/:id", (req, res) => {
-  const deviceId = req.params.id;
-  const device = devices.get(deviceId);
-  
-  if (!device) return res.status(404).json({ error: "Not found" });
+// 5. STATUS-CHECK
+app.get("/devices/:id", async (req, res) => {
+  const device = await db.get("SELECT * FROM devices WHERE deviceId = ?", [req.params.id]);
+  if (!device) return res.status(404).send("Not found");
 
-  // --- SMART AUTO-SLEEP LOGIK ---
-  // Ein Gerät ist "aktiv wach", wenn:
-  // 1. Die App generell aktiv ist (lastAppActivity < 60s) UND das Gerät auf isAwake steht
-  // 2. ODER wenn das Gerät gerade explizit von jemandem beobachtet wird (Marker selektiert)
-  
   const appIsActive = (Date.now() - lastAppActivity) < 60000;
-  const isWatched = watchers.has(deviceId) && watchers.get(deviceId).size > 0;
-  
-  const effectiveAwakeState = (device.isAwake && appIsActive) || isWatched;
+  const isWatched = watchers.has(device.deviceId) && watchers.get(device.deviceId).size > 0;
+  const effectiveAwake = (device.isAwake && appIsActive) || isWatched;
 
-  res.json({
-    ...device,
-    isAwake: effectiveAwakeState,
-    isWatched: isWatched
-  });
+  res.json({ ...device, alarmActive: !!device.alarmActive, isAwake: !!effectiveAwake, isWatched });
 });
 
-// 7. LISTE ALLER GERÄTE (Abfrage alle 1.5 - 5s durch die App)
-app.get("/devices", (req, res) => {
-  // Jede Abfrage der Liste registriert App-Aktivität
+// 6. GERÄTE-LISTE
+app.get("/devices", async (req, res) => {
   lastAppActivity = Date.now();
-  
+  const rows = await db.all("SELECT * FROM devices");
   const now = Date.now();
-  const list = Array.from(devices.values()).map(d => {
-    const isWatched = watchers.has(d.deviceId) && watchers.get(d.deviceId).size > 0;
-    return {
-      ...d,
-      status: (now - d.timestamp < 60000) ? "online" : "offline",
-      isWatched: isWatched
-    };
-  });
-  res.json(list);
+  res.json(rows.map(d => ({
+    ...d,
+    alarmActive: !!d.alarmActive,
+    isWatched: watchers.has(d.deviceId) && watchers.get(d.deviceId).size > 0,
+    status: (now - d.timestamp < 60000) ? "online" : "offline"
+  })));
 });
 
-// 8. ALARM FUNKTIONEN
-app.post("/devices/:id/ring", (req, res) => {
-  const device = devices.get(req.params.id) || { deviceId: req.params.id, isAwake: true };
-  device.alarmActive = true;
-  devices.set(req.params.id, device);
-  res.json({ status: "alarm activated" });
+// 7. ALARM
+app.post("/devices/:id/ring", async (req, res) => {
+  await db.run("UPDATE devices SET alarmActive = 1 WHERE deviceId = ?", [req.params.id]);
+  res.sendStatus(200);
 });
 
-app.post("/devices/:id/reset-alarm", (req, res) => {
-  const device = devices.get(req.params.id);
-  if (device) {
-    device.alarmActive = false;
-    devices.set(req.params.id, device);
-  }
-  res.json({ status: "alarm reset" });
+app.post("/devices/:id/reset-alarm", async (req, res) => {
+  await db.run("UPDATE devices SET alarmActive = 0 WHERE deviceId = ?", [req.params.id]);
+  res.sendStatus(200);
 });
 
-app.listen(PORT, () => console.log(`Server läuft auf Port ${PORT}`));
+app.listen(PORT, () => console.log(`Server auf Port ${PORT}`));
