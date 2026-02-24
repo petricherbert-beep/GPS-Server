@@ -16,7 +16,7 @@ let db;
     CREATE TABLE IF NOT EXISTS devices (
       deviceId TEXT PRIMARY KEY,
       lat REAL, lon REAL, speed REAL, battery INTEGER, accuracy REAL,
-      name TEXT, timestamp INTEGER, alarmActive INTEGER DEFAULT 0, isAwake INTEGER DEFAULT 0
+      name TEXT, timestamp INTEGER, alarmActive INTEGER DEFAULT 0, isAwake INTEGER DEFAULT 1
     )
   `);
 })();
@@ -31,7 +31,7 @@ app.post("/location/update", async (req, res) => {
   if (!deviceId) return res.sendStatus(400);
 
   const existing = await db.get("SELECT isAwake, alarmActive FROM devices WHERE deviceId = ?", [deviceId]);
-  const currentAwake = existing ? existing.isAwake : 0;
+  const currentAwake = existing ? existing.isAwake : 1; // Neue Geräte starten WACH
   const currentAlarm = existing ? existing.alarmActive : 0;
 
   await db.run(`
@@ -82,7 +82,9 @@ app.get("/devices", async (req, res) => {
   const rows = await db.all("SELECT * FROM devices");
   const now = Date.now();
   res.json(rows.map(d => ({
-    ...d, alarmActive: !!d.alarmActive,
+    ...d,
+    alarmActive: !!d.alarmActive,
+    isAwake: !!((d.isAwake && isAppActive()) || (watchers.has(d.deviceId) && watchers.get(d.deviceId).size > 0)),
     isWatched: watchers.has(d.deviceId) && watchers.get(d.deviceId).size > 0,
     status: (now - d.timestamp < 65000) ? "online" : "offline"
   })));
