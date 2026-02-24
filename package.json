@@ -2,8 +2,7 @@
   "name": "gps-server",
   "version": "1.0.0",
   "main": "server.js",
-  "type": "module",
-  "scripts": {
+  "type": "module","scripts": {
     "start": "node server.js"
   },
   "engines": {
@@ -12,6 +11,8 @@
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
     "firebase-admin": "^13.6.1"
   }
 }
