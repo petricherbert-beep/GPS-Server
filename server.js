@@ -3,6 +3,7 @@ import cors from "cors";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import admin from "firebase-admin";
+import { WebSocketServer, WebSocket } from "ws"; // NEU: WebSocket Import
 
 const app = express();
 app.use(cors());
@@ -11,26 +12,22 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 /* ======================================================
-   🔥 FIREBASE INITIALISIERUNG (RENDER READY)
+   🔥 FIREBASE INITIALISIERUNG
 ====================================================== */
 
 try {
   if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
-    throw new Error("FIREBASE_SERVICE_ACCOUNT ist nicht gesetzt!");
-  }
-
-  if (!admin.apps.length) {
+    console.warn("⚠️ FIREBASE_SERVICE_ACCOUNT ist nicht gesetzt!");
+  } else if (!admin.apps.length) {
     admin.initializeApp({
       credential: admin.credential.cert(
         JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
       ),
     });
+    console.log("✅ Firebase Admin initialisiert.");
   }
-
-  console.log("✅ Firebase Admin erfolgreich initialisiert.");
 } catch (error) {
   console.error("❌ Firebase Initialisierung fehlgeschlagen:", error.message);
-  process.exit(1); // Stoppt Server wenn Firebase nicht läuft
 }
 
 /* ======================================================
@@ -65,6 +62,24 @@ let db;
 })();
 
 /* ======================================================
+   🧹 AUTOMATISCHER CLEANUP (Alle 30 Min)
+   Löscht Geräte, die älter als 24 Stunden sind.
+====================================================== */
+
+setInterval(async () => {
+  if (!db) return;
+  const cutoff = Date.now() - (24 * 60 * 60 * 1000);
+  try {
+    const result = await db.run("DELETE FROM devices WHERE timestamp < ?", [cutoff]);
+    if (result.changes > 0) {
+      console.log(`🧹 Cleanup: ${result.changes} inaktive Geräte gelöscht.`);
+    }
+  } catch (err) {
+    console.error("❌ Cleanup Fehler:", err.message);
+  }
+}, 30 * 60 * 1000);
+
+/* ======================================================
    👀 GHOST MODE & APP STATUS
 ====================================================== */
 
@@ -78,10 +93,7 @@ const isAppActive = () => Date.now() - lastAppActivity < 60000;
 ====================================================== */
 
 async function sendPush(targetDeviceId, data) {
-  if (!admin.apps.length) {
-    console.log("Firebase nicht initialisiert – Push übersprungen.");
-    return;
-  }
+  if (!admin.apps.length || !db) return;
 
   const device = await db.get(
     "SELECT fcmToken FROM devices WHERE deviceId = ?",
@@ -95,12 +107,10 @@ async function sendPush(targetDeviceId, data) {
       token: device.fcmToken,
       data,
       notification: {
-        title: data.title,
-        body: data.message,
+        title: data.title ?? "",
+        body: data.message ?? "",
       },
     });
-
-    console.log("📩 Push gesendet an", targetDeviceId);
   } catch (error) {
     console.log("Push Fehler:", error.message);
   }
@@ -111,11 +121,11 @@ async function sendPush(targetDeviceId, data) {
 ====================================================== */
 
 app.get("/", (req, res) => {
-  res.json({ status: "Server läuft!", appActive: isAppActive() });
+  res.json({ status: "Server läuft!", appActive: isAppActive(), wsActive: true });
 });
 
 /* ------------------------------
-   1️⃣ LOCATION UPDATE
+   1️⃣ LOCATION UPDATE (Mit Broadcast)
 ------------------------------ */
 
 app.post("/location/update", async (req, res) => {
@@ -142,6 +152,7 @@ app.post("/location/update", async (req, res) => {
 
     const currentAwake = existing ? existing.isAwake : 1;
     const currentAlarm = existing ? existing.alarmActive : 0;
+    const timestamp = Date.now();
 
     await db.run(
       `
@@ -168,14 +179,21 @@ app.post("/location/update", async (req, res) => {
         battery,
         accuracy,
         name,
-        Date.now(),
+        timestamp,
         currentAwake,
         currentAlarm,
         fcmToken,
       ]
     );
 
-    // Geofence Event → Push an alle anderen
+    // ECHTZEIT BROADCAST AN ALLE APPS
+    broadcast({
+        deviceId, lat, lon, speed, battery, accuracy, name, timestamp,
+        status: "online",
+        isAwake: !!currentAwake,
+        alarmActive: !!currentAlarm
+    });
+
     if (geofenceEvent) {
       const rows = await db.all(
         "SELECT deviceId FROM devices WHERE deviceId != ?",
@@ -319,9 +337,20 @@ app.post("/devices/:id/reset-alarm", async (req, res) => {
 });
 
 /* ======================================================
-   🚀 SERVER START
+   🚀 SERVER START & WEBSOCKET BROADCAST
 ====================================================== */
 
-app.listen(PORT, () =>
+const server = app.listen(PORT, () =>
   console.log(`🚀 Server läuft auf Port ${PORT}`)
 );
+
+const wss = new WebSocketServer({ server });
+
+function broadcast(data) {
+  const message = JSON.stringify(data);
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
