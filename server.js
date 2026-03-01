@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
-import sqlite3 from "sqlite3";
-import { open } from "sqlite";
+import sqlite3 from "sqlite3";import { open } from "sqlite";
 import admin from "firebase-admin";
 import { WebSocketServer, WebSocket } from "ws";
 
@@ -19,9 +18,7 @@ try {
     console.warn("⚠️ FIREBASE_SERVICE_ACCOUNT ist nicht gesetzt!");
   } else if (!admin.apps.length) {
     admin.initializeApp({
-      credential: admin.credential.cert(
-        JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-      ),
+      credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
     });
     console.log("✅ Firebase Admin initialisiert.");
   }
@@ -34,18 +31,12 @@ try {
 ====================================================== */
 let db;
 (async () => {
-  db = await open({
-    filename: "./database.db",
-    driver: sqlite3.Database,
-  });
-
+  db = await open({ filename: "./database.db", driver: sqlite3.Database });
   await db.exec(`
     CREATE TABLE IF NOT EXISTS devices (
-      deviceId TEXT PRIMARY KEY,
-      lat REAL, lon REAL, speed REAL, battery INTEGER,
-      accuracy REAL, name TEXT, timestamp INTEGER,
-      alarmActive INTEGER DEFAULT 0, isAwake INTEGER DEFAULT 1,
-      fcmToken TEXT
+      deviceId TEXT PRIMARY KEY, lat REAL, lon REAL, speed REAL, battery INTEGER,
+      accuracy REAL, name TEXT, timestamp INTEGER, alarmActive INTEGER DEFAULT 0,
+      isAwake INTEGER DEFAULT 1, fcmToken TEXT
     )
   `);
   console.log("✅ SQLite Datenbank bereit.");
@@ -56,10 +47,10 @@ let db;
 ====================================================== */
 setInterval(async () => {
   if (!db) return;
-  const cutoff = Date.now() - (24 * 60 * 60 * 1000);
+  const cutoff = Date.now() - (24 * 60 * 60 * 1000); // 24 Stunden
   try {
     const result = await db.run("DELETE FROM devices WHERE timestamp < ?", [cutoff]);
-    if (result.changes > 0) console.log(`🧹 Cleanup: ${result.changes} Geräte gelöscht.`);
+    if (result.changes > 0) console.log(`🧹 Cleanup: ${result.changes} inaktive Geräte gelöscht.`);
   } catch (err) { console.error("❌ Cleanup Fehler:", err.message); }
 }, 30 * 60 * 1000);
 
@@ -68,22 +59,27 @@ let lastAppActivity = 0;
 const isAppActive = () => Date.now() - lastAppActivity < 60000;
 
 /* ======================================================
-   🔔 PUSH FUNKTION
+   🔔 PUSH FUNKTION (Optimiert für Alarme & Hintergrund)
 ====================================================== */
 async function sendPush(targetDeviceId, data) {
   if (!admin.apps.length || !db) return;
   const device = await db.get("SELECT fcmToken FROM devices WHERE deviceId = ?", [targetDeviceId]);
   if (!device?.fcmToken) return;
 
+  const message = {
+    token: device.fcmToken,
+    data: data,
+    android: { priority: 'high' } // WICHTIG für Alarme & Hintergrund-Aktivität
+  };
+
+  // Nur normale Benachrichtigungen bekommen den notification-Block,
+  // Alarme/Befehle werden von der App leise im Hintergrund verarbeitet.
+  if (data.type !== 'alarm' && data.type !== 'stop_alarm' && data.type !== 'wakeup') {
+    message.notification = { title: data.title ?? "GPS Tracker", body: data.message ?? "" };
+  }
+
   try {
-    await admin.messaging().send({
-      token: device.fcmToken,
-      data,
-      notification: {
-        title: data.title ?? "GPS Tracker",
-        body: data.message ?? "",
-      },
-    });
+    await admin.messaging().send(message);
   } catch (error) { console.log("Push Fehler:", error.message); }
 }
 
@@ -112,14 +108,14 @@ app.post("/location/update", async (req, res) => {
 
     broadcast({ deviceId, lat, lon, speed, battery, accuracy, name, timestamp, status: "online", isAwake: !!currentAwake, alarmActive: !!currentAlarm });
 
-    // GEOPUSH: Wenn ein Event vorliegt, alle anderen informieren
+    // Wenn ein Geofence-Event (betritt/verlässt) vorliegt -> Push an alle anderen
     if (geofenceEvent) {
-      const rows = await db.all("SELECT deviceId FROM devices WHERE deviceId != ?", [deviceId]);
-      for (const r of rows) {
-        await sendPush(r.deviceId, {
-          type: "geofence_alert", // Optimierter Typ
-          title: "Zonen-Alarm",
-          message: `${name || deviceId} ${geofenceEvent}`,
+      const otherDevices = await db.all("SELECT deviceId FROM devices WHERE deviceId != ?", [deviceId]);
+      for (const d of otherDevices) {
+        await sendPush(d.deviceId, {
+          type: "geofence_alert",
+          title: "Zonen-Info",
+          message: `${name || deviceId} ${geofenceEvent}`
         });
       }
     }
@@ -131,22 +127,40 @@ app.get("/devices", async (req, res) => {
   lastAppActivity = Date.now();
   const rows = await db.all("SELECT * FROM devices");
   const now = Date.now();
-  res.json(rows.map((d) => ({
+  res.json(rows.map(d => ({
     ...d,
     alarmActive: d.alarmActive === 1,
     isWatched: watchers.has(d.deviceId) && watchers.get(d.deviceId).size > 0,
-    status: now - d.timestamp < 65000 ? "online" : "offline",
+    status: now - d.timestamp < 65000 ? "online" : "offline"
   })));
 });
 
-// ... (Andere Routen wie wakeup-all, sleep, ring etc. bleiben gleich)
+app.post("/devices/:id/ring", async (req, res) => {
+  const id = req.params.id.toLowerCase();
+  await db.run("UPDATE devices SET alarmActive = 1 WHERE deviceId = ?", [id]);
+  await sendPush(id, { type: "alarm", title: "ALARM!", message: "Gerät wird gesucht!" });
+  res.sendStatus(200);
+});
+
+app.post("/devices/:id/reset-alarm", async (req, res) => {
+  const id = req.params.id.toLowerCase();
+  await db.run("UPDATE devices SET alarmActive = 0 WHERE deviceId = ?", [id]);
+  await sendPush(id, { type: "stop_alarm" });
+  res.sendStatus(200);
+});
+
+app.post("/devices/wakeup-all", async (req, res) => {
+  lastAppActivity = Date.now();
+  await db.run("UPDATE devices SET isAwake = 1");
+  res.json({ status: "all awake" });
+});
+
+// ... (Andere Routen wie sleep, watch/unwatch, status bleiben gleich)
 
 const server = app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
 const wss = new WebSocketServer({ server });
 
 function broadcast(data) {
   const message = JSON.stringify(data);
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) client.send(message);
-  });
+  wss.clients.forEach(client => { if (client.readyState === WebSocket.OPEN) client.send(message); });
 }
