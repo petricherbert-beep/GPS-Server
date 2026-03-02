@@ -41,6 +41,18 @@ let db;
     )
   `);
   console.log("✅ Datenbank bereit.");
+  
+  // Cleanup-Job: Alle 60 Minuten alte Geräte löschen
+  setInterval(async () => {
+    if (!db) return;
+    const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+    try {
+      const result = await db.run("DELETE FROM devices WHERE timestamp < ?", [oneDayAgo]);
+      if (result.changes > 0) {
+        console.log(`🧹 Cleanup: ${result.changes} inaktive Geräte (älter als 24h) gelöscht.`);
+      }
+    } catch (err) { console.error("❌ Cleanup Fehler:", err.message); }
+  }, 60 * 60 * 1000);
 })();
 
 /* ======================================================
@@ -58,12 +70,11 @@ async function sendPush(targetDeviceId, data) {
     token: device.fcmToken,
     data: stringData,
     android: { 
-      priority: 'high', // Wichtig, um Geräte aus dem Schlaf zu wecken
+      priority: 'high',
       ttl: 0 
     }
   };
 
-  // Sichtbare Benachrichtigung nur für Geofence-Events
   if (data.type === 'geofence_alert') {
     message.notification = { title: data.title, body: data.message };
   }
@@ -96,10 +107,8 @@ app.post("/location/update", async (req, res) => {
         timestamp=excluded.timestamp, fcmToken=COALESCE(excluded.fcmToken, devices.fcmToken)
     `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, currentAlarm]);
 
-    // WebSocket Broadcast für alle Live-Zuschauer
     broadcast({ deviceId, lat, lon, speed, battery, accuracy, name, timestamp, status: "online", alarmActive: !!currentAlarm });
 
-    // Geofence-Event an andere pushen
     if (geofenceEvent) {
       const others = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
       for (const d of others) {
@@ -116,15 +125,14 @@ app.get("/devices", async (req, res) => {
   res.json(rows.map(d => ({
     ...d,
     alarmActive: d.alarmActive === 1,
-    status: now - d.timestamp < 65000 ? "online" : "offline"
+    // Status auf "offline" nach 15 Minuten (15 * 60 * 1000 = 900.000 ms)
+    status: now - d.timestamp < 900000 ? "online" : "offline"
   })));
 });
 
-// WAKEUP: Alle Geräte per Push aufwecken
 app.post("/devices/wakeup-all", async (req, res) => {
   try {
     const devices = await db.all("SELECT deviceId FROM devices");
-    console.log(`📣 Sende Wakeup an ${devices.length} Geräte...`);
     for (const d of devices) {
       await sendPush(d.deviceId, { type: "wakeup" });
     }
