@@ -1,4 +1,5 @@
-import express from "express";import cors from "cors";
+import express from "express";
+import cors from "cors";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import admin from "firebase-admin";
@@ -36,8 +37,7 @@ let db;
       deviceId TEXT PRIMARY KEY COLLATE NOCASE, 
       lat REAL, lon REAL, speed REAL, battery INTEGER,
       accuracy REAL, name TEXT, timestamp INTEGER, 
-      alarmActive INTEGER DEFAULT 0, isAwake INTEGER DEFAULT 1, 
-      fcmToken TEXT
+      alarmActive INTEGER DEFAULT 0, fcmToken TEXT
     )
   `);
   console.log("✅ Datenbank bereit.");
@@ -57,9 +57,13 @@ async function sendPush(targetDeviceId, data) {
   const message = {
     token: device.fcmToken,
     data: stringData,
-    android: { priority: 'high', ttl: 0 }
+    android: { 
+      priority: 'high', // Wichtig, um Geräte aus dem Schlaf zu wecken
+      ttl: 0 
+    }
   };
 
+  // Sichtbare Benachrichtigung nur für Geofence-Events
   if (data.type === 'geofence_alert') {
     message.notification = { title: data.title, body: data.message };
   }
@@ -75,7 +79,7 @@ async function sendPush(targetDeviceId, data) {
 ====================================================== */
 
 app.post("/location/update", async (req, res) => {
-  let { deviceId, lat, lon, speed, battery, accuracy, name, fcmToken, geofenceEvent } = req.body;
+  const { deviceId, lat, lon, speed, battery, accuracy, name, fcmToken, geofenceEvent } = req.body;
   if (!deviceId) return res.sendStatus(400);
 
   const timestamp = Date.now();
@@ -92,8 +96,10 @@ app.post("/location/update", async (req, res) => {
         timestamp=excluded.timestamp, fcmToken=COALESCE(excluded.fcmToken, devices.fcmToken)
     `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, currentAlarm]);
 
+    // WebSocket Broadcast für alle Live-Zuschauer
     broadcast({ deviceId, lat, lon, speed, battery, accuracy, name, timestamp, status: "online", alarmActive: !!currentAlarm });
 
+    // Geofence-Event an andere pushen
     if (geofenceEvent) {
       const others = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
       for (const d of others) {
@@ -114,9 +120,11 @@ app.get("/devices", async (req, res) => {
   })));
 });
 
+// WAKEUP: Alle Geräte per Push aufwecken
 app.post("/devices/wakeup-all", async (req, res) => {
   try {
     const devices = await db.all("SELECT deviceId FROM devices");
+    console.log(`📣 Sende Wakeup an ${devices.length} Geräte...`);
     for (const d of devices) {
       await sendPush(d.deviceId, { type: "wakeup" });
     }
@@ -143,6 +151,7 @@ app.post("/devices/:id/reset-alarm", async (req, res) => {
 
 const server = app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
 const wss = new WebSocketServer({ server });
+
 function broadcast(data) {
   const msg = JSON.stringify(data);
   wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg); });
