@@ -69,34 +69,38 @@ async function sendPush(targetDeviceId, data) {
     [targetDeviceId]
   );
 
-  if (!device?.fcmToken) return;
+  if (!device?.fcmToken) {
+    console.error(`❌ Kein Token für Gerät ${targetDeviceId} gefunden.`);
+    return;
+  }
 
-  // Die Nachricht für Firebase vorbereiten
+  // WICHTIG: Alle Werte im 'data' Payload MÜSSEN Strings sein!
+  const stringData = {};
+  Object.keys(data).forEach(key => {
+    stringData[key] = String(data[key]); 
+  });
+
   const message = {
     token: device.fcmToken,
-    data: data, // Enthält Typ, Titel, Nachricht
+    data: stringData, 
     android: {
-      priority: 'high', // WICHTIG: Erzwingt sofortige Zustellung (High Priority)
-      ttl: 0,           // Nachricht verfällt nicht, wird sofort gesendet
+      priority: 'high', // Erlaubt Zustellung im Hintergrund
+      ttl: 0,
     }
   };
 
-  // LOGIK:
-  // Für Alarme senden wir KEINEN 'notification'-Block. 
-  // Das sorgt dafür, dass die App im Hintergrund 'onMessageReceived' ausführt 
-  // und den Klingelton selbst startet.
-  if (data.type !== 'alarm' && data.type !== 'stop_alarm') {
+  if (stringData.type !== 'alarm' && stringData.type !== 'stop_alarm') {
     message.notification = {
-      title: data.title ?? "GPS Tracker",
-      body: data.message ?? "",
+      title: stringData.title || "GPS Tracker",
+      body: stringData.message || "",
     };
   }
 
   try {
-    await admin.messaging().send(message);
-    console.log(`✅ Push gesendet an ${targetDeviceId} (Typ: ${data.type})`);
+    const response = await admin.messaging().send(message);
+    console.log(`✅ Push erfolgreich gesendet an ${targetDeviceId}. ID: ${response}`);
   } catch (error) {
-    console.error("❌ Push Fehler:", error.message);
+    console.error(`❌ Firebase Fehler für ${targetDeviceId}:`, error.message);
   }
 }
 
