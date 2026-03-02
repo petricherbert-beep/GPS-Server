@@ -1,5 +1,4 @@
-import express from "express";
-import cors from "cors";
+import express from "express";import cors from "cors";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import admin from "firebase-admin";
@@ -12,34 +11,22 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 /* ======================================================
-   🔥 FIREBASE INITIALISIERUNG (Robust für Render/Heroku)
+   🔥 FIREBASE INITIALISIERUNG
 ====================================================== */
 try {
   const accountVar = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (accountVar && !admin.apps.length) {
-    let serviceAccount;
-    const trimmed = accountVar.trim();
-    if (trimmed.startsWith('{')) {
-        serviceAccount = JSON.parse(trimmed);
-    } else {
-        serviceAccount = JSON.parse(Buffer.from(trimmed, 'base64').toString('utf8'));
-    }
-    
+    let serviceAccount = JSON.parse(accountVar.trim().startsWith('{') ? accountVar : Buffer.from(accountVar, 'base64').toString('utf8'));
     if (serviceAccount.private_key) {
       serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n').replace(/^"/, '').replace(/"$/, '');
     }
-    
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
     console.log("✅ Firebase Admin initialisiert.");
   }
-} catch (error) {
-  console.error("❌ Firebase Fehler:", error.message);
-}
+} catch (error) { console.error("❌ Firebase Fehler:", error.message); }
 
 /* ======================================================
-   🗄 SQLITE DATENBANK (Mit allen Tracking-Feldern)
+   🗄 SQLITE DATENBANK
 ====================================================== */
 let db;
 (async () => {
@@ -53,11 +40,11 @@ let db;
       fcmToken TEXT
     )
   `);
-  console.log("✅ SQLite Datenbank bereit.");
+  console.log("✅ Datenbank bereit.");
 })();
 
 /* ======================================================
-   🔔 PUSH FUNKTION (Daten-optimiert)
+   🔔 PUSH FUNKTION
 ====================================================== */
 async function sendPush(targetDeviceId, data) {
   if (!admin.apps.length || !db) return;
@@ -73,47 +60,43 @@ async function sendPush(targetDeviceId, data) {
     android: { priority: 'high', ttl: 0 }
   };
 
-  // Benachrichtigung nur für Geofence, nicht für stille Befehle (Alarm/Stop)
-  if (!['alarm', 'stop_alarm', 'wakeup'].includes(data.type)) {
-    message.notification = { title: data.title ?? "GPS Tracker", body: data.message ?? "" };
+  if (data.type === 'geofence_alert') {
+    message.notification = { title: data.title, body: data.message };
   }
 
   try {
     await admin.messaging().send(message);
     console.log(`🚀 Push an ${targetDeviceId} gesendet (${data.type})`);
-  } catch (error) { console.error("❌ Push Fehler:", error.message); }
+  } catch (error) { console.error(`❌ Push Fehler (${targetDeviceId}):`, error.message); }
 }
 
 /* ======================================================
    🌍 API ROUTEN
 ====================================================== */
 
-// WICHTIG: Speichert jetzt alle Koordinaten wieder!
 app.post("/location/update", async (req, res) => {
   let { deviceId, lat, lon, speed, battery, accuracy, name, fcmToken, geofenceEvent } = req.body;
   if (!deviceId) return res.sendStatus(400);
 
   const timestamp = Date.now();
   try {
-    const existing = await db.get("SELECT isAwake, alarmActive FROM devices WHERE deviceId = ? COLLATE NOCASE", [deviceId]);
-    const currentAwake = existing ? existing.isAwake : 1;
+    const existing = await db.get("SELECT alarmActive FROM devices WHERE deviceId = ? COLLATE NOCASE", [deviceId]);
     const currentAlarm = existing ? existing.alarmActive : 0;
 
     await db.run(`
-      INSERT INTO devices (deviceId, lat, lon, speed, battery, accuracy, name, timestamp, isAwake, alarmActive, fcmToken)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO devices (deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, alarmActive)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(deviceId) DO UPDATE SET
         lat=excluded.lat, lon=excluded.lon, speed=excluded.speed, battery=excluded.battery,
         accuracy=excluded.accuracy, name=COALESCE(excluded.name, devices.name), 
         timestamp=excluded.timestamp, fcmToken=COALESCE(excluded.fcmToken, devices.fcmToken)
-    `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, currentAwake, currentAlarm, fcmToken]);
+    `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, currentAlarm]);
 
-    // Sofortige Aktualisierung für die Karte via WebSocket
-    broadcast({ deviceId, lat, lon, speed, battery, accuracy, name, timestamp, status: "online", isAwake: !!currentAwake, alarmActive: !!currentAlarm });
+    broadcast({ deviceId, lat, lon, speed, battery, accuracy, name, timestamp, status: "online", alarmActive: !!currentAlarm });
 
     if (geofenceEvent) {
-      const otherDevices = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
-      for (const d of otherDevices) {
+      const others = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
+      for (const d of others) {
         await sendPush(d.deviceId, { type: "geofence_alert", title: "Zonen-Info", message: `${name || deviceId} ${geofenceEvent}` });
       }
     }
@@ -127,20 +110,32 @@ app.get("/devices", async (req, res) => {
   res.json(rows.map(d => ({
     ...d,
     alarmActive: d.alarmActive === 1,
-    isAwake: d.isAwake === 1,
     status: now - d.timestamp < 65000 ? "online" : "offline"
   })));
+});
+
+app.post("/devices/wakeup-all", async (req, res) => {
+  try {
+    const devices = await db.all("SELECT deviceId FROM devices");
+    for (const d of devices) {
+      await sendPush(d.deviceId, { type: "wakeup" });
+    }
+    res.json({ status: "Wakeup broadcasted" });
+  } catch (err) { res.sendStatus(500); }
 });
 
 app.post("/devices/:id/ring", async (req, res) => {
   const id = req.params.id;
   await db.run("UPDATE devices SET alarmActive = 1 WHERE deviceId = ? COLLATE NOCASE", [id]);
-  await sendPush(id, { type: "alarm", title: "ALARM!", message: "Gerät wird gesucht!" });
+  await sendPush(id, { type: "alarm" });
   res.sendStatus(200);
 });
 
 app.post("/devices/:id/reset-alarm", async (req, res) => {
   const id = req.params.id;
+  const device = await db.get("SELECT alarmActive FROM devices WHERE deviceId = ? COLLATE NOCASE", [id]);
+  if (!device || device.alarmActive === 0) return res.status(200).send("Already stopped");
+
   await db.run("UPDATE devices SET alarmActive = 0 WHERE deviceId = ? COLLATE NOCASE", [id]);
   await sendPush(id, { type: "stop_alarm" });
   res.sendStatus(200);
@@ -148,8 +143,7 @@ app.post("/devices/:id/reset-alarm", async (req, res) => {
 
 const server = app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
 const wss = new WebSocketServer({ server });
-
 function broadcast(data) {
-  const message = JSON.stringify(data);
-  wss.clients.forEach(client => { if (client.readyState === WebSocket.OPEN) client.send(message); });
+  const msg = JSON.stringify(data);
+  wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg); });
 }
