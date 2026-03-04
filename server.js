@@ -45,7 +45,7 @@ let db;
   // Cleanup-Job: Alle 60 Minuten alte Geräte löschen
   setInterval(async () => {
     if (!db) return;
-    const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+    const oneDayAgo = Date.now() - (48 * 60 * 60 * 1000);
     try {
       const result = await db.run("DELETE FROM devices WHERE timestamp < ?", [oneDayAgo]);
       if (result.changes > 0) {
