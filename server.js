@@ -11,6 +11,10 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
+// Speichert, welches Gerät gerade von wem beobachtet wird
+// Map<targetDeviceId, Set<watcherDeviceId>>
+const activeWatchers = new Map();
+
 /* ======================================================
    🔥 FIREBASE INITIALISIERUNG
 ====================================================== */
@@ -42,18 +46,17 @@ let db;
   `);
   console.log("✅ Datenbank bereit.");
 
-  // STARTUP PUSH: Weckt alle Geräte via Topic auf, sobald der Server startet
-  // Das funktioniert auch, wenn die lokale Datenbank gelöscht wurde!
+  // STARTUP PUSH: Alle Handys via Topic wecken, damit sie sich neu anmelden
   await wakeupAllDevicesViaTopic();
   
-  // Cleanup-Job: Alle 60 Minuten alte Geräte löschen
+  // Cleanup-Job: Alle 60 Minuten alte Geräte (älter als 24h) löschen
   setInterval(async () => {
     if (!db) return;
     const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
     try {
       const result = await db.run("DELETE FROM devices WHERE timestamp < ?", [oneDayAgo]);
       if (result.changes > 0) {
-        console.log(`扫 Cleanup: ${result.changes} inaktive Geräte (älter als 24h) gelöscht.`);
+        console.log(`🧹 Cleanup: ${result.changes} inaktive Geräte gelöscht.`);
       }
     } catch (err) { console.error("❌ Cleanup Fehler:", err.message); }
   }, 60 * 60 * 1000);
@@ -63,7 +66,7 @@ let db;
    🔔 PUSH FUNKTIONEN
 ====================================================== */
 
-// Sendet Push an ein spezifisches Gerät (via Token aus DB)
+// Sendet Push an ein spezifisches Gerät (via Token)
 async function sendPush(targetDeviceId, data) {
   if (!admin.apps.length || !db) return;
   const device = await db.get("SELECT fcmToken FROM devices WHERE deviceId = ? COLLATE NOCASE", [targetDeviceId]);
@@ -88,7 +91,7 @@ async function sendPush(targetDeviceId, data) {
   } catch (error) { console.error(`❌ Push Fehler (${targetDeviceId}):`, error.message); }
 }
 
-// Weckt ALLE Geräte via Topic auf (Unabhängig von der DB)
+// Weckt ALLE Geräte via Topic auf (Firebase verwaltet die Abos)
 async function wakeupAllDevicesViaTopic() {
   if (!admin.apps.length) return;
   try {
@@ -124,7 +127,13 @@ app.post("/location/update", async (req, res) => {
         timestamp=excluded.timestamp, fcmToken=COALESCE(excluded.fcmToken, devices.fcmToken)
     `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, currentAlarm]);
 
-    broadcast({ deviceId, lat, lon, speed, battery, accuracy, name, timestamp, status: "online", alarmActive: !!currentAlarm });
+    // Echtzeit-Broadcast an alle WebSockets
+    broadcast({ 
+      deviceId, lat, lon, speed, battery, accuracy, name, timestamp, 
+      status: "online", 
+      alarmActive: !!currentAlarm,
+      isWatched: activeWatchers.has(deviceId.toLowerCase())
+    });
 
     if (geofenceEvent) {
       const others = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
@@ -142,14 +151,37 @@ app.get("/devices", async (req, res) => {
   res.json(rows.map(d => ({
     ...d,
     alarmActive: d.alarmActive === 1,
+    isWatched: activeWatchers.has(d.deviceId.toLowerCase()),
     status: now - d.timestamp < 900000 ? "online" : "offline"
   })));
 });
 
-// Route zum manuellen Aufwecken aller Geräte via Topic
 app.post("/devices/wakeup-all", async (req, res) => {
   await wakeupAllDevicesViaTopic();
   res.json({ status: "Wakeup via Topic gesendet" });
+});
+
+app.post("/devices/:id/watch", async (req, res) => {
+  const targetId = req.params.id.toLowerCase();
+  const watcherId = req.query.watcherId;
+  if (!activeWatchers.has(targetId)) activeWatchers.set(targetId, new Set());
+  activeWatchers.get(targetId).add(watcherId);
+  
+  await sendPush(targetId, { type: "watch_state", isWatched: "true" });
+  res.sendStatus(200);
+});
+
+app.post("/devices/:id/unwatch", async (req, res) => {
+  const targetId = req.params.id.toLowerCase();
+  const watcherId = req.query.watcherId;
+  if (activeWatchers.has(targetId)) {
+    activeWatchers.get(targetId).delete(watcherId);
+    if (activeWatchers.get(targetId).size === 0) {
+      activeWatchers.delete(targetId);
+      await sendPush(targetId, { type: "watch_state", isWatched: "false" });
+    }
+  }
+  res.sendStatus(200);
 });
 
 app.post("/devices/:id/ring", async (req, res) => {
@@ -161,9 +193,6 @@ app.post("/devices/:id/ring", async (req, res) => {
 
 app.post("/devices/:id/reset-alarm", async (req, res) => {
   const id = req.params.id;
-  const device = await db.get("SELECT alarmActive FROM devices WHERE deviceId = ? COLLATE NOCASE", [id]);
-  if (!device || device.alarmActive === 0) return res.status(200).send("Already stopped");
-
   await db.run("UPDATE devices SET alarmActive = 0 WHERE deviceId = ? COLLATE NOCASE", [id]);
   await sendPush(id, { type: "stop_alarm" });
   res.sendStatus(200);
