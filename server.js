@@ -47,6 +47,7 @@ let db;
   console.log("✅ Datenbank bereit.");
 
   // STARTUP PUSH: Alle Handys via Topic wecken, damit sie sich neu anmelden
+  // Das funktioniert auch, wenn die DB beim Neustart (z.B. auf Render) gelöscht wurde.
   await wakeupAllDevicesViaTopic();
   
   // Cleanup-Job: Alle 60 Minuten alte Geräte (älter als 24h) löschen
@@ -91,7 +92,7 @@ async function sendPush(targetDeviceId, data) {
   } catch (error) { console.error(`❌ Push Fehler (${targetDeviceId}):`, error.message); }
 }
 
-// Weckt ALLE Geräte via Topic auf (Firebase verwaltet die Abos)
+// Weckt ALLE Geräte via Topic auf
 async function wakeupAllDevicesViaTopic() {
   if (!admin.apps.length) return;
   try {
@@ -127,7 +128,7 @@ app.post("/location/update", async (req, res) => {
         timestamp=excluded.timestamp, fcmToken=COALESCE(excluded.fcmToken, devices.fcmToken)
     `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, currentAlarm]);
 
-    // Echtzeit-Broadcast an alle WebSockets
+    // Echtzeit-Broadcast an Karte
     broadcast({ 
       deviceId, lat, lon, speed, battery, accuracy, name, timestamp, 
       status: "online", 
@@ -152,7 +153,8 @@ app.get("/devices", async (req, res) => {
     ...d,
     alarmActive: d.alarmActive === 1,
     isWatched: activeWatchers.has(d.deviceId.toLowerCase()),
-    status: now - d.timestamp < 900000 ? "online" : "offline"
+    // Timeout auf 25 Minuten erhöht (25 * 60 * 1000 = 1.500.000 ms)
+    status: now - d.timestamp < 1500000 ? "online" : "offline"
   })));
 });
 
@@ -193,6 +195,9 @@ app.post("/devices/:id/ring", async (req, res) => {
 
 app.post("/devices/:id/reset-alarm", async (req, res) => {
   const id = req.params.id;
+  const device = await db.get("SELECT alarmActive FROM devices WHERE deviceId = ? COLLATE NOCASE", [id]);
+  if (!device || device.alarmActive === 0) return res.status(200).send("Already stopped");
+
   await db.run("UPDATE devices SET alarmActive = 0 WHERE deviceId = ? COLLATE NOCASE", [id]);
   await sendPush(id, { type: "stop_alarm" });
   res.sendStatus(200);
