@@ -27,7 +27,7 @@ try {
 } catch (error) { console.error("❌ Firebase Fehler:", error.message); }
 
 /* ======================================================
-   🗄 SQLITE DATENBANK
+   🗄 SQLITE DATENBANK & STARTUP LOGIK
 ====================================================== */
 let db;
 (async () => {
@@ -41,23 +41,29 @@ let db;
     )
   `);
   console.log("✅ Datenbank bereit.");
+
+  // STARTUP PUSH: Weckt alle Geräte via Topic auf, sobald der Server startet
+  // Das funktioniert auch, wenn die lokale Datenbank gelöscht wurde!
+  await wakeupAllDevicesViaTopic();
   
   // Cleanup-Job: Alle 60 Minuten alte Geräte löschen
   setInterval(async () => {
     if (!db) return;
-    const oneDayAgo = Date.now() - (48 * 60 * 60 * 1000);
+    const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
     try {
       const result = await db.run("DELETE FROM devices WHERE timestamp < ?", [oneDayAgo]);
       if (result.changes > 0) {
-        console.log(`🧹 Cleanup: ${result.changes} inaktive Geräte (älter als 24h) gelöscht.`);
+        console.log(`扫 Cleanup: ${result.changes} inaktive Geräte (älter als 24h) gelöscht.`);
       }
     } catch (err) { console.error("❌ Cleanup Fehler:", err.message); }
   }, 60 * 60 * 1000);
 })();
 
 /* ======================================================
-   🔔 PUSH FUNKTION
+   🔔 PUSH FUNKTIONEN
 ====================================================== */
+
+// Sendet Push an ein spezifisches Gerät (via Token aus DB)
 async function sendPush(targetDeviceId, data) {
   if (!admin.apps.length || !db) return;
   const device = await db.get("SELECT fcmToken FROM devices WHERE deviceId = ? COLLATE NOCASE", [targetDeviceId]);
@@ -69,10 +75,7 @@ async function sendPush(targetDeviceId, data) {
   const message = {
     token: device.fcmToken,
     data: stringData,
-    android: { 
-      priority: 'high',
-      ttl: 0 
-    }
+    android: { priority: 'high', ttl: 0 }
   };
 
   if (data.type === 'geofence_alert') {
@@ -83,6 +86,20 @@ async function sendPush(targetDeviceId, data) {
     await admin.messaging().send(message);
     console.log(`🚀 Push an ${targetDeviceId} gesendet (${data.type})`);
   } catch (error) { console.error(`❌ Push Fehler (${targetDeviceId}):`, error.message); }
+}
+
+// Weckt ALLE Geräte via Topic auf (Unabhängig von der DB)
+async function wakeupAllDevicesViaTopic() {
+  if (!admin.apps.length) return;
+  try {
+    const message = {
+      topic: "all_devices",
+      data: { type: "wakeup" },
+      android: { priority: 'high' }
+    };
+    await admin.messaging().send(message);
+    console.log("📣 Globaler Wakeup-Push an Topic 'all_devices' gesendet.");
+  } catch (error) { console.error("❌ Topic-Push Fehler:", error.message); }
 }
 
 /* ======================================================
@@ -125,19 +142,14 @@ app.get("/devices", async (req, res) => {
   res.json(rows.map(d => ({
     ...d,
     alarmActive: d.alarmActive === 1,
-    // Status auf "offline" nach 15 Minuten (15 * 60 * 1000 = 900.000 ms)
     status: now - d.timestamp < 900000 ? "online" : "offline"
   })));
 });
 
+// Route zum manuellen Aufwecken aller Geräte via Topic
 app.post("/devices/wakeup-all", async (req, res) => {
-  try {
-    const devices = await db.all("SELECT deviceId FROM devices");
-    for (const d of devices) {
-      await sendPush(d.deviceId, { type: "wakeup" });
-    }
-    res.json({ status: "Wakeup broadcasted" });
-  } catch (err) { res.sendStatus(500); }
+  await wakeupAllDevicesViaTopic();
+  res.json({ status: "Wakeup via Topic gesendet" });
 });
 
 app.post("/devices/:id/ring", async (req, res) => {
@@ -157,6 +169,9 @@ app.post("/devices/:id/reset-alarm", async (req, res) => {
   res.sendStatus(200);
 });
 
+/* ======================================================
+   🔌 SERVER & WEBSOCKET
+====================================================== */
 const server = app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
 const wss = new WebSocketServer({ server });
 
