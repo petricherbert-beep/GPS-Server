@@ -14,6 +14,8 @@ const PORT = process.env.PORT || 3000;
 // Speichert, welches Gerät gerade von wem beobachtet wird
 // Map<targetDeviceId, Set<watcherDeviceId>>
 const activeWatchers = new Map();
+// NEU: Speichert den Zeitstempel der letzten Watch-Aktivität
+const lastWatchActivity = new Map();
 
 /* ======================================================
    🔥 FIREBASE INITIALISIERUNG
@@ -46,11 +48,10 @@ let db;
   `);
   console.log("✅ Datenbank bereit.");
 
-  // STARTUP PUSH: Alle Handys via Topic wecken, damit sie sich neu anmelden
-  // Das funktioniert auch, wenn die DB beim Neustart (z.B. auf Render) gelöscht wurde.
+  // STARTUP PUSH
   await wakeupAllDevicesViaTopic();
   
-  // Cleanup-Job: Alle 60 Minuten alte Geräte (älter als 48h) löschen
+  // Cleanup-Job für inaktive Geräte: Alle 60 Minuten (älter als 12h löschen)
   setInterval(async () => {
     if (!db) return;
     const oneDayAgo = Date.now() - (12 * 60 * 60 * 1000);
@@ -61,13 +62,38 @@ let db;
       }
     } catch (err) { console.error("❌ Cleanup Fehler:", err.message); }
   }, 60 * 60 * 1000);
+
+  // NEU: Cleanup-Job für isWatched (Timeout nach 10 Minuten Inaktivität)
+  setInterval(async () => {
+    const now = Date.now();
+    const timeout = 10 * 60 * 1000; // 10 Minuten
+
+    for (const [targetId, lastActive] of lastWatchActivity.entries()) {
+      if (now - lastActive > timeout) {
+        console.log(`⏱️ Timeout: ${targetId} wird nicht mehr beobachtet (10 Min Inaktivität).`);
+        
+        activeWatchers.delete(targetId);
+        lastWatchActivity.delete(targetId);
+
+        // Handy informieren (Push)
+        await sendPush(targetId, { type: "watch_state", isWatched: "false" });
+
+        // Alle WebSockets informieren (Auge-Symbol auf Karten entfernen)
+        broadcast({ 
+          deviceId: targetId, 
+          isWatched: false,
+          status: "online" 
+        });
+      }
+    }
+  }, 60 * 1000); // Check jede Minute
+
 })();
 
 /* ======================================================
    🔔 PUSH FUNKTIONEN
 ====================================================== */
 
-// Sendet Push an ein spezifisches Gerät (via Token)
 async function sendPush(targetDeviceId, data) {
   if (!admin.apps.length || !db) return;
   const device = await db.get("SELECT fcmToken FROM devices WHERE deviceId = ? COLLATE NOCASE", [targetDeviceId]);
@@ -92,7 +118,6 @@ async function sendPush(targetDeviceId, data) {
   } catch (error) { console.error(`❌ Push Fehler (${targetDeviceId}):`, error.message); }
 }
 
-// Weckt ALLE Geräte via Topic auf
 async function wakeupAllDevicesViaTopic() {
   if (!admin.apps.length) return;
   try {
@@ -128,7 +153,6 @@ app.post("/location/update", async (req, res) => {
         timestamp=excluded.timestamp, fcmToken=COALESCE(excluded.fcmToken, devices.fcmToken)
     `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, currentAlarm]);
 
-    // Echtzeit-Broadcast an Karte
     broadcast({ 
       deviceId, lat, lon, speed, battery, accuracy, name, timestamp, 
       status: "online", 
@@ -153,21 +177,19 @@ app.get("/devices", async (req, res) => {
     ...d,
     alarmActive: d.alarmActive === 1,
     isWatched: activeWatchers.has(d.deviceId.toLowerCase()),
-    // Timeout auf 25 Minuten erhöht (25 * 60 * 1000 = 1.500.000 ms)
     status: now - d.timestamp < 1500000 ? "online" : "offline"
   })));
-});
-
-app.post("/devices/wakeup-all", async (req, res) => {
-  await wakeupAllDevicesViaTopic();
-  res.json({ status: "Wakeup via Topic gesendet" });
 });
 
 app.post("/devices/:id/watch", async (req, res) => {
   const targetId = req.params.id.toLowerCase();
   const watcherId = req.query.watcherId;
+  
   if (!activeWatchers.has(targetId)) activeWatchers.set(targetId, new Set());
   activeWatchers.get(targetId).add(watcherId);
+  
+  // Zeitstempel für dieses Gerät aktualisieren
+  lastWatchActivity.set(targetId, Date.now());
   
   await sendPush(targetId, { type: "watch_state", isWatched: "true" });
   res.sendStatus(200);
@@ -176,16 +198,19 @@ app.post("/devices/:id/watch", async (req, res) => {
 app.post("/devices/:id/unwatch", async (req, res) => {
   const targetId = req.params.id.toLowerCase();
   const watcherId = req.query.watcherId;
+  
   if (activeWatchers.has(targetId)) {
     activeWatchers.get(targetId).delete(watcherId);
     if (activeWatchers.get(targetId).size === 0) {
       activeWatchers.delete(targetId);
+      lastWatchActivity.delete(targetId); // Auch Zeitstempel löschen
       await sendPush(targetId, { type: "watch_state", isWatched: "false" });
     }
   }
   res.sendStatus(200);
 });
 
+// ... (Restliche Routen wie /ring, /reset-alarm identisch)
 app.post("/devices/:id/ring", async (req, res) => {
   const id = req.params.id;
   await db.run("UPDATE devices SET alarmActive = 1 WHERE deviceId = ? COLLATE NOCASE", [id]);
@@ -197,7 +222,6 @@ app.post("/devices/:id/reset-alarm", async (req, res) => {
   const id = req.params.id;
   const device = await db.get("SELECT alarmActive FROM devices WHERE deviceId = ? COLLATE NOCASE", [id]);
   if (!device || device.alarmActive === 0) return res.status(200).send("Already stopped");
-
   await db.run("UPDATE devices SET alarmActive = 0 WHERE deviceId = ? COLLATE NOCASE", [id]);
   await sendPush(id, { type: "stop_alarm" });
   res.sendStatus(200);
