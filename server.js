@@ -177,7 +177,7 @@ app.get("/devices", async (req, res) => {
     ...d,
     alarmActive: d.alarmActive === 1,
     isWatched: activeWatchers.has(d.deviceId.toLowerCase()),
-    status: now - d.timestamp < 1500000 ? "online" : "offline"
+    status: now - d.timestamp < 7200000 ? "online" : "offline"
   })));
 });
 
