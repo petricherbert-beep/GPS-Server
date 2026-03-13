@@ -36,7 +36,6 @@ let db;
 (async () => {
   db = await open({ filename: "./database.db", driver: sqlite3.Database });
   
-  // Tabellenschema mit neuen Status-Feldern
   await db.exec(`
     CREATE TABLE IF NOT EXISTS devices (
       deviceId TEXT PRIMARY KEY COLLATE NOCASE, 
@@ -52,7 +51,6 @@ let db;
 
   await wakeupAllDevicesViaTopic();
   
-  // Cleanup für uralte Geräte
   setInterval(async () => {
     if (!db) return;
     const twelveHoursAgo = Date.now() - (12 * 60 * 60 * 1000);
@@ -61,7 +59,6 @@ let db;
     } catch (err) { console.error("❌ Cleanup Fehler:", err.message); }
   }, 60 * 60 * 1000);
 
-  // Watcher-Timeout (10 Min)
   setInterval(async () => {
     const now = Date.now();
     const timeout = 10 * 60 * 1000;
@@ -110,7 +107,6 @@ app.post("/location/update", async (req, res) => {
       isLocked ? 1 : 0, isMotion ? 1 : 0, isWifi ? 1 : 0
     ]);
 
-    // Echtzeit-Broadcast an alle Apps
     broadcast({ 
       deviceId, lat, lon, speed, battery, accuracy, name, timestamp, 
       status: "online", 
@@ -134,11 +130,8 @@ app.post("/location/update", async (req, res) => {
 app.get("/devices", async (req, res) => {
   const rows = await db.all("SELECT * FROM devices");
   const now = Date.now();
-  
   res.json(rows.map(d => {
-    // ZOMBIE-FIX: Wenn Gerät länger als 2,5 Min nicht gesendet hat -> Offline
     const isOnline = now - d.timestamp < 150000; 
-    
     return {
       ...d,
       alarmActive: d.alarmActive === 1,
@@ -149,6 +142,37 @@ app.get("/devices", async (req, res) => {
       status: isOnline ? "online" : "offline"
     };
   }));
+});
+
+// NEU: Alarm-Endpunkt (Löst 404-Problem)
+app.post("/devices/:id/alarm", async (req, res) => {
+  const deviceId = req.params.id.toLowerCase();
+  const { active } = req.query; // ?active=true oder false
+  const alarmValue = active === "true" ? 1 : 0;
+
+  try {
+    await db.run("UPDATE devices SET alarmActive = ? WHERE deviceId = ? COLLATE NOCASE", [alarmValue, deviceId]);
+    
+    // Befehl per Push an das Android-Gerät senden
+    await sendPush(deviceId, { 
+      type: alarmValue ? "alarm" : "stop_alarm",
+      title: "Alarm-System",
+      message: alarmValue ? "ALARM AUSGELÖST!" : "Alarm beendet."
+    });
+
+    const device = await db.get("SELECT * FROM devices WHERE deviceId = ? COLLATE NOCASE", [deviceId]);
+    if (device) broadcast({ ...device, alarmActive: !!alarmValue, status: "online" });
+
+    res.sendStatus(200);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// NEU: Aufwecken-Endpunkt (Löst 404-Problem)
+app.post("/devices/wakeup-all", async (req, res) => {
+  try {
+    await wakeupAllDevicesViaTopic();
+    res.sendStatus(200);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post("/devices/:id/watch", async (req, res) => {
