@@ -53,7 +53,7 @@ let db;
   
   setInterval(async () => {
     if (!db) return;
-    const twelveHoursAgo = Date.now() - (36 * 60 * 60 * 1000);
+    const twelveHoursAgo = Date.now() - (144 * 60 * 60 * 1000);
     try {
       await db.run("DELETE FROM devices WHERE timestamp < ?", [twelveHoursAgo]);
     } catch (err) { console.error("❌ Cleanup Fehler:", err.message); }
