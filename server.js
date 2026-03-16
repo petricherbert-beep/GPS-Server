@@ -1,5 +1,5 @@
 /* ======================================================
-   🌐 SERVER.JS – KOMPLETTE VERSION
+   🌐 SERVER.JS – KOMPLETTE VERSION (REINES JS)
 ====================================================== */
 import express from "express";
 import cors from "cors";
@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 3000;
 const activeWatchers = new Map();
 const lastWatchActivity = new Map();
 
-let db: any;
+let db;
 
 /* ======================================================
    🔥 FIREBASE INITIALISIERUNG
@@ -227,17 +227,17 @@ app.post("/devices/:id/unwatch", async (req, res) => {
 const server = app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
 const wss = new WebSocketServer({ server });
 
-function broadcast(data: any) {
+function broadcast(data) {
   const msg = JSON.stringify(data);
   wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg); });
 }
 
-async function sendPush(targetDeviceId: string, data: any) {
+async function sendPush(targetDeviceId, data) {
   if (!admin.apps.length || !db) return;
   const device = await db.get("SELECT fcmToken FROM device_tokens WHERE deviceId = ? COLLATE NOCASE", [targetDeviceId]);
   if (!device?.fcmToken) return;
 
-  const stringData: Record<string, string> = {};
+  const stringData = {};
   Object.keys(data).forEach(key => { stringData[key] = String(data[key]); });
 
   try {
