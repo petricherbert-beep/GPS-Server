@@ -163,7 +163,7 @@ app.get("/devices", async (req, res) => {
     isMotion: d.isMotion === 1 && now - d.timestamp < 150000,
     isWifi: d.isWifi === 1,
     isWatched: activeWatchers.has(d.deviceId.toLowerCase()),
-    status: now - d.timestamp < 150000 ? "online" : "offline"
+    status: now - d.timestamp < 24 * 60 *60 * 1000 ? "online" : "offline"
   })));
 });
 
