@@ -144,7 +144,7 @@ app.post("/location/update", async (req, res) => {
     if (geofenceEvent) {
       const others = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
       for (const d of others) {
-        await sendPush(d.deviceId, { type: "geofence_alert", title: "Zonen-Info", message: `${name || deviceId} ${geofenceEvent}` });
+        await sendPush(d.deviceId, { type: "geofence_event", title: "Zonen-Info", message: `${name || deviceId} ${geofenceEvent}` });
       }
     }
     res.json({ status: "ok" });
