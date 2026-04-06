@@ -1,5 +1,5 @@
 /* ======================================================
-   🌐 SERVER.JS – OPTIMIERTE VERSION (m/s & Geofence Fix)
+   🌐 SERVER.JS – OPTIMIERTE VERSION (m/s & Watcher-Name)
 ====================================================== */
 import express from "express";
 import cors from "cors";
@@ -13,7 +13,7 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const activeWatchers = new Map();
+const activeWatchers = new Map(); // targetId -> Set(watcherId)
 const lastWatchActivity = new Map();
 
 let db;
@@ -115,7 +115,22 @@ app.post("/location/update", async (req, res) => {
       `, [deviceId, fcmToken, timestamp]);
     }
 
-    broadcast({ deviceId, lat, lon, speed, battery, accuracy, name, timestamp, status: "online", alarmActive: !!currentAlarm, isLocked: !!isLocked, isMotion: !!isMotion, isWifi: !!isWifi, isWatched: activeWatchers.has(deviceId.toLowerCase()) });
+    // --- Watcher Info für Broadcast sammeln ---
+    const watchers = activeWatchers.get(deviceId.toLowerCase());
+    let watcherName = null;
+    if (watchers && watchers.size > 0) {
+      const firstId = watchers.values().next().value.toLowerCase();
+      const wRow = await db.get("SELECT name FROM devices WHERE deviceId = ? COLLATE NOCASE", [firstId]);
+      watcherName = wRow ? (wRow.name || firstId) : "Jemand";
+    }
+
+    broadcast({ 
+      deviceId, lat, lon, speed, battery, accuracy, name, timestamp, 
+      status: "online", alarmActive: !!currentAlarm, 
+      isLocked: !!isLocked, isMotion: !!isMotion, isWifi: !!isWifi, 
+      isWatched: !!watchers && watchers.size > 0,
+      watcherName: watcherName 
+    });
 
     // 🔥 GEOFENCE NOTIFICATION FIX
     if (geofenceEvent) {
@@ -140,15 +155,31 @@ app.post("/location/update", async (req, res) => {
 app.get("/devices", async (req, res) => {
   const rows = await db.all("SELECT * FROM devices");
   const now = Date.now();
-  res.json(rows.map(d => ({
-    ...d,
-    alarmActive: d.alarmActive === 1,
-    isLocked: d.isLocked === 1 && now - d.timestamp < 150000,
-    isMotion: d.isMotion === 1 && now - d.timestamp < 150000,
-    isWifi: d.isWifi === 1,
-    isWatched: activeWatchers.has(d.deviceId.toLowerCase()),
-    status: now - d.timestamp < 24 * 60 * 60 * 1000 ? "online" : "offline"
-  })));
+  
+  // Namens-Lookup-Map für Watcher-Anzeige
+  const nameMap = new Map(rows.map(r => [r.deviceId.toLowerCase(), r.name || r.deviceId]));
+
+  res.json(rows.map(d => {
+    const targetId = d.deviceId.toLowerCase();
+    const watchers = activeWatchers.get(targetId);
+    let watcherName = null;
+    
+    if (watchers && watchers.size > 0) {
+      const firstWatcherId = watchers.values().next().value.toLowerCase();
+      watcherName = nameMap.get(firstWatcherId) || "Jemand";
+    }
+
+    return {
+      ...d,
+      alarmActive: d.alarmActive === 1,
+      isLocked: d.isLocked === 1 && now - d.timestamp < 150000,
+      isMotion: d.isMotion === 1 && now - d.timestamp < 150000,
+      isWifi: d.isWifi === 1,
+      isWatched: !!watchers && watchers.size > 0,
+      watcherName: watcherName,
+      status: now - d.timestamp < 24 * 60 * 60 * 1000 ? "online" : "offline"
+    };
+  }));
 });
 
 /* ======================================================
@@ -181,7 +212,19 @@ app.post("/devices/:id/watch", async (req, res) => {
   activeWatchers.get(targetId).add(watcherId);
   lastWatchActivity.set(targetId, Date.now());
 
-  await sendPush(targetId, { type: "watch_state", isWatched: "true" });
+  // Watcher Namen für Bestätigung/Push finden
+  const watcherRow = await db.get("SELECT name FROM devices WHERE deviceId = ? COLLATE NOCASE", [watcherId.toLowerCase()]);
+  const wName = watcherRow ? (watcherRow.name || watcherId) : watcherId;
+
+  await sendPush(targetId, { 
+    type: "watch_state", 
+    isWatched: "true",
+    watcherName: wName 
+  });
+  
+  // Sofortiger Broadcast, damit alle UI-Clients den Namen sehen
+  broadcast({ deviceId: targetId, isWatched: true, watcherName: wName });
+  
   res.sendStatus(200);
 });
 
@@ -196,6 +239,7 @@ app.post("/devices/:id/unwatch", async (req, res) => {
       activeWatchers.delete(targetId);
       lastWatchActivity.delete(targetId);
       await sendPush(targetId, { type: "watch_state", isWatched: "false" });
+      broadcast({ deviceId: targetId, isWatched: false, watcherName: null });
     }
   }
   res.sendStatus(200);
@@ -212,7 +256,6 @@ function broadcast(data) {
   wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg); });
 }
 
-// 🔥 Wichtiger Push für Xiaomi & Hintergrund: DATA-MESSAGE, priority high
 async function sendPush(targetDeviceId, data) {
   if (!admin.apps.length || !db) return;
 
@@ -226,7 +269,7 @@ async function sendPush(targetDeviceId, data) {
     await admin.messaging().send({ 
       token: device.fcmToken, 
       data: stringData, 
-      android: { priority: "high", ttl: 0, notification: undefined } 
+      android: { priority: "high", ttl: 0 } 
     });
     console.log(`✅ Push gesendet an ${targetDeviceId}:`, stringData);
   } catch (e) { console.error("❌ Push Error:", e.message); }
