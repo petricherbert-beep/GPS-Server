@@ -1,5 +1,5 @@
 /* ======================================================
-   🌐 SERVER.JS – KOMPLETTE VERSION (REINES JS)
+   🌐 SERVER.JS – OPTIMIERTE VERSION (m/s & Geofence Fix)
 ====================================================== */
 import express from "express";
 import cors from "cors";
@@ -66,36 +66,14 @@ try {
     )
   `);
 
-  console.log("✅ Datenbank bereit.");
+  console.log("✅ Datenbank bereit (Speed-Modus: m/s).");
 
   await wakeupAllDevicesViaTopic();
 
-  // Geräte nach 7 Tagen löschen
-  setInterval(async () => {
-    if (!db) return;
-    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    try {
-      await db.run("DELETE FROM devices WHERE timestamp < ?", [sevenDaysAgo]);
-    } catch (err) {
-      console.error("❌ Cleanup Fehler:", err.message);
-    }
-  }, 60 * 60 * 1000);
-
-  // Tokens nach 14 Tagen löschen
-  setInterval(async () => {
-    if (!db) return;
-    const fourteenDaysAgo = Date.now() - 14 * 24 * 60 * 60 * 1000;
-    try {
-      await db.run("DELETE FROM device_tokens WHERE updatedAt < ?", [fourteenDaysAgo]);
-    } catch (err) {
-      console.error("❌ Token Cleanup Fehler:", err.message);
-    }
-  }, 24 * 60 * 60 * 1000);
-
-  // Watcher Timeout
+  // Watcher Timeout (10 Min)
   setInterval(async () => {
     const now = Date.now();
-    const timeout = 10 * 60 * 1000; // 10 Min
+    const timeout = 10 * 60 * 1000;
     for (const [targetId, lastActive] of lastWatchActivity.entries()) {
       if (now - lastActive > timeout) {
         activeWatchers.delete(targetId);
@@ -120,6 +98,7 @@ app.post("/location/update", async (req, res) => {
     const existing = await db.get("SELECT alarmActive FROM devices WHERE deviceId = ? COLLATE NOCASE", [deviceId]);
     const currentAlarm = existing ? existing.alarmActive : 0;
 
+    // Speichert 'speed' 1:1 als m/s (wie vom Handy gesendet)
     await db.run(`
       INSERT INTO devices (deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, alarmActive, isLocked, isMotion, isWifi)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -130,7 +109,6 @@ app.post("/location/update", async (req, res) => {
         isLocked=excluded.isLocked, isMotion=excluded.isMotion, isWifi=excluded.isWifi
     `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, currentAlarm, isLocked ? 1 : 0, isMotion ? 1 : 0, isWifi ? 1 : 0]);
 
-    // Token speichern / aktualisieren
     if (fcmToken) {
       await db.run(`
         INSERT INTO device_tokens (deviceId, fcmToken, updatedAt)
@@ -139,12 +117,22 @@ app.post("/location/update", async (req, res) => {
       `, [deviceId, fcmToken, timestamp]);
     }
 
+    // Live-Broadcast an alle WebSockets
     broadcast({ deviceId, lat, lon, speed, battery, accuracy, name, timestamp, status: "online", alarmActive: !!currentAlarm, isLocked: !!isLocked, isMotion: !!isMotion, isWifi: !!isWifi, isWatched: activeWatchers.has(deviceId.toLowerCase()) });
 
+    // 🔥 GEOFENCE NOTIFICATION FIX
     if (geofenceEvent) {
       const others = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
       for (const d of others) {
-        await sendPush(d.deviceId, { type: "geofence_event", title: "Zonen-Info", message: `${name || deviceId} ${geofenceEvent}` });
+        // Wir nutzen den Typ "geofence_event", damit die App sofort reagiert
+        await sendPush(d.deviceId, { 
+          type: "geofence_event", 
+          title: "Zonen-Info", 
+          message: `${name || deviceId} ${geofenceEvent}`,
+          deviceName: name || deviceId,
+          zoneName: "Zone",
+          action: geofenceEvent // Enthält "betreten" oder "verlassen"
+        });
       }
     }
     res.json({ status: "ok" });
@@ -163,12 +151,12 @@ app.get("/devices", async (req, res) => {
     isMotion: d.isMotion === 1 && now - d.timestamp < 150000,
     isWifi: d.isWifi === 1,
     isWatched: activeWatchers.has(d.deviceId.toLowerCase()),
-    status: now - d.timestamp < 24 * 60 *60 * 1000 ? "online" : "offline"
+    status: now - d.timestamp < 24 * 60 * 60 * 1000 ? "online" : "offline"
   })));
 });
 
 /* ======================================================
-   🔔 ALARM & WATCH
+   🔔 ALARM & WATCH STEUERUNG
 ====================================================== */
 app.post("/devices/:id/alarm", async (req, res) => {
   const deviceId = req.params.id.toLowerCase();
@@ -177,19 +165,15 @@ app.post("/devices/:id/alarm", async (req, res) => {
 
   try {
     await db.run("UPDATE devices SET alarmActive = ? WHERE deviceId = ? COLLATE NOCASE", [alarmValue, deviceId]);
-    await sendPush(deviceId, { type: alarmValue ? "alarm" : "stop_alarm", title: "Alarm-System", message: alarmValue ? "ALARM AUSGELÖST!" : "Alarm beendet." });
-
-    const device = await db.get("SELECT * FROM devices WHERE deviceId = ? COLLATE NOCASE", [deviceId]);
-    if (device) broadcast({ ...device, alarmActive: !!alarmValue, status: "online" });
-
+    await sendPush(deviceId, { 
+      type: alarmValue ? "alarm" : "stop_alarm", 
+      title: "Alarm-System", 
+      message: alarmValue ? "ALARM AUSGELÖST!" : "Alarm beendet." 
+    });
     res.sendStatus(200);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
-
-app.post("/devices/wakeup-all", async (req, res) => {
-  try { await wakeupAllDevicesViaTopic(); res.sendStatus(200); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post("/devices/:id/watch", async (req, res) => {
@@ -222,7 +206,7 @@ app.post("/devices/:id/unwatch", async (req, res) => {
 });
 
 /* ======================================================
-   🔌 WEBSOCKET & PUSH HELPERS
+   🔌 HELPERS (BROADCAST & PUSH)
 ====================================================== */
 const server = app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
 const wss = new WebSocketServer({ server });
@@ -241,7 +225,11 @@ async function sendPush(targetDeviceId, data) {
   Object.keys(data).forEach(key => { stringData[key] = String(data[key]); });
 
   try {
-    await admin.messaging().send({ token: device.fcmToken, data: stringData, android: { priority: "high" } });
+    await admin.messaging().send({ 
+      token: device.fcmToken, 
+      data: stringData, 
+      android: { priority: "high", ttl: 0 } 
+    });
   } catch (e) { console.error("❌ Push Error:", e.message); }
 }
 
