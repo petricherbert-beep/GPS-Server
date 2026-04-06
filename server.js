@@ -88,7 +88,6 @@ try {
 /* ======================================================
    🌍 API ROUTEN
 ====================================================== */
-
 app.post("/location/update", async (req, res) => {
   const { deviceId, lat, lon, speed, battery, accuracy, name, fcmToken, geofenceEvent, isLocked, isMotion, isWifi } = req.body;
   if (!deviceId) return res.sendStatus(400);
@@ -98,7 +97,6 @@ app.post("/location/update", async (req, res) => {
     const existing = await db.get("SELECT alarmActive FROM devices WHERE deviceId = ? COLLATE NOCASE", [deviceId]);
     const currentAlarm = existing ? existing.alarmActive : 0;
 
-    // Speichert 'speed' 1:1 als m/s (wie vom Handy gesendet)
     await db.run(`
       INSERT INTO devices (deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, alarmActive, isLocked, isMotion, isWifi)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -117,21 +115,19 @@ app.post("/location/update", async (req, res) => {
       `, [deviceId, fcmToken, timestamp]);
     }
 
-    // Live-Broadcast an alle WebSockets
     broadcast({ deviceId, lat, lon, speed, battery, accuracy, name, timestamp, status: "online", alarmActive: !!currentAlarm, isLocked: !!isLocked, isMotion: !!isMotion, isWifi: !!isWifi, isWatched: activeWatchers.has(deviceId.toLowerCase()) });
 
     // 🔥 GEOFENCE NOTIFICATION FIX
     if (geofenceEvent) {
       const others = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
       for (const d of others) {
-        // Wir nutzen den Typ "geofence_event", damit die App sofort reagiert
         await sendPush(d.deviceId, { 
           type: "geofence_event", 
           title: "Zonen-Info", 
           message: `${name || deviceId} ${geofenceEvent}`,
           deviceName: name || deviceId,
           zoneName: "Zone",
-          action: geofenceEvent // Enthält "betreten" oder "verlassen"
+          action: geofenceEvent
         });
       }
     }
@@ -216,8 +212,10 @@ function broadcast(data) {
   wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg); });
 }
 
+// 🔥 Wichtiger Push für Xiaomi & Hintergrund: DATA-MESSAGE, priority high
 async function sendPush(targetDeviceId, data) {
   if (!admin.apps.length || !db) return;
+
   const device = await db.get("SELECT fcmToken FROM device_tokens WHERE deviceId = ? COLLATE NOCASE", [targetDeviceId]);
   if (!device?.fcmToken) return;
 
@@ -228,8 +226,9 @@ async function sendPush(targetDeviceId, data) {
     await admin.messaging().send({ 
       token: device.fcmToken, 
       data: stringData, 
-      android: { priority: "high", ttl: 0 } 
+      android: { priority: "high", ttl: 0, notification: undefined } 
     });
+    console.log(`✅ Push gesendet an ${targetDeviceId}:`, stringData);
   } catch (e) { console.error("❌ Push Error:", e.message); }
 }
 
