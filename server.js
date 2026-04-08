@@ -1,5 +1,5 @@
 /* ======================================================
-   🌐 SERVER.JS – VOLLSTÄNDIGE VERSION (Geofences + Watcher)
+   🌐 SERVER.JS – VOLLSTÄNDIGE VERSION (Inkl. Auto-Wakeup & Geofences)
 ====================================================== */
 import express from "express";
 import cors from "cors";
@@ -68,7 +68,7 @@ try {
     )
   `);
 
-  // 📍 NEU: Geofence-Tabelle
+  // Geofence-Tabelle
   await db.exec(`
     CREATE TABLE IF NOT EXISTS geofences (
       id TEXT PRIMARY KEY,
@@ -84,23 +84,41 @@ try {
     )
   `);
 
-  console.log("✅ Datenbank bereit (Inklusive Geofences).");
+  console.log("✅ Datenbank bereit.");
 
   await wakeupAllDevicesViaTopic();
 
-  // Watcher Timeout Checker (10 Min Inaktivität -> Watch-Status aus)
+  /* ======================================================
+     🕵️‍♂️ SERVER-WATCHDOG (Automatisches Aufwecken)
+  ====================================================== */
   setInterval(async () => {
     const now = Date.now();
-    const timeout = 10 * 60 * 1000;
+    const watcherTimeout = 10 * 60 * 1000; // Watcher-Status läuft nach 10 Min Inaktivität ab
+    const targetInactivityTimeout = 5 * 60 * 1000; // 5 Minuten Funkstille sind zu viel
+
     for (const [targetId, lastActive] of lastWatchActivity.entries()) {
-      if (now - lastActive > timeout) {
+      
+      // 1. Inaktive Watcher entfernen
+      if (now - lastActive > watcherTimeout) {
         activeWatchers.delete(targetId);
         lastWatchActivity.delete(targetId);
         await sendPush(targetId, { type: "watch_state", isWatched: "false" });
         broadcast({ deviceId: targetId, isWatched: false, status: "online" });
+        continue;
+      }
+
+      // 2. Ziel-Gerät prüfen: Wenn beobachtet, aber stumm -> Wakeup senden
+      const device = await db.get("SELECT timestamp FROM devices WHERE deviceId = ? COLLATE NOCASE", [targetId]);
+      if (device && (now - device.timestamp > targetInactivityTimeout)) {
+        console.log(`⚠️ Gerät ${targetId} ist stumm (>5 Min). Sende Rettungs-Push...`);
+        await sendPush(targetId, { 
+            type: "wakeup", 
+            title: "Verbindung prüfen", 
+            message: "Automatischer Wiederverbindungs-Versuch" 
+        });
       }
     }
-  }, 60 * 1000);
+  }, 60 * 1000); // Prüfung jede Minute
 })();
 
 /* ======================================================
@@ -221,8 +239,22 @@ app.delete("/geofences/:id", async (req, res) => {
 });
 
 /* ======================================================
-   🔔 ALARM & WATCH STEUERUNG
+   🔔 ALARM & WATCH & WAKEUP STEUERUNG
 ====================================================== */
+
+// Manuelles Aufwecken eines Geräts (für App-Button)
+app.post("/devices/:id/wakeup", async (req, res) => {
+    const deviceId = req.params.id.toLowerCase();
+    try {
+      await sendPush(deviceId, { 
+          type: "wakeup", 
+          title: "System-Check", 
+          message: "Standort-Abfrage erzwungen" 
+      });
+      res.json({ status: "wakeup_sent" });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post("/devices/:id/alarm", async (req, res) => {
   const deviceId = req.params.id.toLowerCase();
   const { active } = req.query;
@@ -286,7 +318,12 @@ async function sendPush(targetDeviceId, data) {
   const stringData = {};
   Object.keys(data).forEach(key => { stringData[key] = String(data[key]); });
   try {
-    await admin.messaging().send({ token: device.fcmToken, data: stringData, android: { priority: "high", ttl: 0 } });
+    // High-Priority Push mit TTL 0 (sofortige Zustellung)
+    await admin.messaging().send({ 
+        token: device.fcmToken, 
+        data: stringData, 
+        android: { priority: "high", ttl: 0 } 
+    });
   } catch (e) { console.error("❌ Push Error:", e.message); }
 }
 
