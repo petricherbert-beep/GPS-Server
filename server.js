@@ -1,5 +1,5 @@
 /* ======================================================
-   🌐 SERVER.JS – VOLLSTÄNDIGE & OPTIMIERTE VERSION
+   🌐 SERVER.JS – FINALE VERSION (Anti-Jumping & Sync)
    ====================================================== */
 import express from "express";
 import cors from "cors";
@@ -63,14 +63,12 @@ try {
     );
     CREATE INDEX IF NOT EXISTS idx_devices_timestamp ON devices(timestamp);
   `);
-
   console.log("✅ Datenbank bereit.");
 
-  /* --- WATCHDOG: ÜBERWACHUNG DER AKTIVITÄT --- */
+  // WATCHDOG: Alle 60 Sek prüfen
   setInterval(async () => {
     const now = Date.now();
     for (const [targetId, lastActive] of lastWatchActivity.entries()) {
-      // 1. Watcher Timeout (10 Min): Wenn niemand mehr zuschaut, Live-Modus beenden
       if (now - lastActive > 10 * 60 * 1000) {
         activeWatchers.delete(targetId);
         lastWatchActivity.delete(targetId);
@@ -78,7 +76,6 @@ try {
         broadcast({ deviceId: targetId, isWatched: false, status: "online" });
         continue;
       }
-      // 2. Target Inactivity Check (20 Min): Rettungs-Push bei Funkstille
       const device = await db.get("SELECT timestamp FROM devices WHERE deviceId = ? COLLATE NOCASE", [targetId]);
       if (device && (now - device.timestamp > 20 * 60 * 1000)) {
         await sendPush(targetId, { type: "wakeup", title: "Verbindung prüfen", message: "Auto-Wakeup aktiv" });
@@ -89,23 +86,34 @@ try {
 
 /* --- API ROUTEN --- */
 
-// 1. STANDORT UPDATE (Mit Race-Condition Schutz für Alarm)
+// 1. STANDORT UPDATE (Mit Anti-Jumping & Alarm-Schutz)
 app.post("/location/update", async (req, res) => {
-  const { deviceId, lat, lon, speed, battery, accuracy, name, fcmToken, geofenceEvent, isLocked, isMotion, isWifi } = req.body;
+  const { 
+    deviceId, lat, lon, speed, battery, accuracy, name, fcmToken, 
+    geofenceEvent, isLocked, isMotion, isWifi, timestamp: deviceTs 
+  } = req.body;
+  
   if (!deviceId) return res.sendStatus(400);
-  const timestamp = Date.now();
+  const timestamp = deviceTs || Date.now();
 
   try {
-    // RACE CONDITION FIX: Bestehenden Alarm-Status beibehalten und nicht durch GPS-Update überschreiben
+    // UPSERT mit Zeitstempel-Prüfung (Verhindert Zurückspringen bei Network-Jitter)
     await db.run(`
       INSERT INTO devices (deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, alarmActive, isLocked, isMotion, isWifi)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
       ON CONFLICT(deviceId) DO UPDATE SET
-        lat=excluded.lat, lon=excluded.lon, speed=excluded.speed, battery=excluded.battery,
-        accuracy=excluded.accuracy, name=COALESCE(excluded.name, devices.name),
-        timestamp=excluded.timestamp, fcmToken=COALESCE(excluded.fcmToken, devices.fcmToken),
-        isLocked=excluded.isLocked, isMotion=excluded.isMotion, isWifi=excluded.isWifi
-        /* alarmActive bleibt unberührt, außer beim ersten Insert */
+        lat = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.lat ELSE devices.lat END,
+        lon = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.lon ELSE devices.lon END,
+        speed = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.speed ELSE devices.speed END,
+        battery = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.battery ELSE devices.battery END,
+        accuracy = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.accuracy ELSE devices.accuracy END,
+        timestamp = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.timestamp ELSE devices.timestamp END,
+        name = COALESCE(excluded.name, devices.name),
+        fcmToken = COALESCE(excluded.fcmToken, devices.fcmToken),
+        isLocked = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.isLocked ELSE devices.isLocked END,
+        isMotion = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.isMotion ELSE devices.isMotion END,
+        isWifi = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.isWifi ELSE devices.isWifi END,
+        alarmActive = devices.alarmActive
     `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, isLocked?1:0, isMotion?1:0, isWifi?1:0]);
 
     if (fcmToken) {
@@ -125,7 +133,7 @@ app.post("/location/update", async (req, res) => {
     if (geofenceEvent && geofenceEvent !== "heartbeat") {
       const others = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
       for (const d of others) {
-        await sendPush(d.deviceId, { type: "geofence_event", title: "Zonen-Info", message: `${name || deviceId}: ${geofenceEvent}` });
+        await sendPush(d.deviceId, { type: "geofence_event", title: "Zonen-Info", message: `${geofenceEvent}` });
       }
     }
     res.json({ status: "ok" });
@@ -143,46 +151,34 @@ app.get("/devices", async (req, res) => {
     isMotion: d.isMotion === 1 && now - d.timestamp < 150000,
     isWifi: d.isWifi === 1,
     isWatched: activeWatchers.has(d.deviceId.toLowerCase()),
-    status: now - d.timestamp < 2 * 60 * 1000 ? "online" : now - d.timestamp < 10 * 60 * 1000 ? "idle" : "offline"
+    status: now - d.timestamp < 120000 ? "online" : now - d.timestamp < 600000 ? "idle" : "offline"
   })));
 });
 
-// 3. ALARM STEUERUNG (Zentraler Endpunkt)
+// 3. ALARM STEUERUNG
 app.post("/devices/:id/alarm", async (req, res) => {
-  const deviceId = req.params.id.toLowerCase();
   const active = req.query.active === "true";
-  
+  const deviceId = req.params.id.toLowerCase();
   try {
     await db.run("UPDATE devices SET alarmActive = ? WHERE deviceId = ? COLLATE NOCASE", [active?1:0, deviceId]);
-    
-    // Push-Typen synchron zum Android LocationService ("alarm" / "stop_alarm")
-    await sendPush(deviceId, { 
-      type: active ? "alarm" : "stop_alarm", 
-      title: "Alarmsystem", 
-      message: active ? "🚨 ALARM AUSGELÖST!" : "✅ Alarm beendet" 
-    });
-
-    // WICHTIG: Sofortiger Broadcast für die Karten-UI
+    await sendPush(deviceId, { type: active ? "alarm" : "stop_alarm", title: "Alarm", message: active ? "🚨 AUSGELÖST!" : "✅ Beendet" });
     broadcast({ deviceId, alarmActive: active, type: "alarm_sync" });
-    
     res.sendStatus(200);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 4. MANUELLER WAKEUP
+// 4. WAKEUP & WATCHING
 app.post("/devices/:id/wakeup", async (req, res) => {
-  await sendPush(req.params.id.toLowerCase(), { type: "wakeup", title: "System-Abfrage", message: "Standort-Update erzwungen" });
+  await sendPush(req.params.id.toLowerCase(), { type: "wakeup", title: "System", message: "Standort erzwungen" });
   res.json({ status: "sent" });
 });
 
-// 5. LIVE-WATCHING (START/STOP)
 app.post("/devices/:id/watch", async (req, res) => {
   const targetId = req.params.id.toLowerCase();
   const watcherId = req.query.watcherId;
   if (!activeWatchers.has(targetId)) activeWatchers.set(targetId, new Set());
   activeWatchers.get(targetId).add(watcherId);
   lastWatchActivity.set(targetId, Date.now());
-  
   await sendPush(targetId, { type: "watch_state", isWatched: "true" });
   broadcast({ deviceId: targetId, isWatched: true });
   res.sendStatus(200);
@@ -192,13 +188,12 @@ app.post("/devices/:id/unwatch", async (req, res) => {
   const targetId = req.params.id.toLowerCase();
   activeWatchers.delete(targetId);
   lastWatchActivity.delete(targetId);
-  
   await sendPush(targetId, { type: "watch_state", isWatched: "false" });
   broadcast({ deviceId: targetId, isWatched: false });
   res.sendStatus(200);
 });
 
-// 6. GEOFENCES
+// 5. GEOFENCES
 app.get("/geofences", async (req, res) => {
   const rows = await db.all("SELECT * FROM geofences");
   res.json(rows.map(g => ({ ...g, alarmVibration: g.alarmVibration === 1, isHome: g.isHome === 1 })));
@@ -206,10 +201,7 @@ app.get("/geofences", async (req, res) => {
 
 app.post("/geofences", async (req, res) => {
   const { id, name, lat, lon, radius, color, createdBy, alarmSound, alarmVibration, isHome } = req.body;
-  await db.run(`INSERT INTO geofences (id, name, lat, lon, radius, color, createdBy, alarmSound, alarmVibration, isHome) 
-                VALUES (?,?,?,?,?,?,?,?,?,?) 
-                ON CONFLICT(id) DO UPDATE SET name=excluded.name, radius=excluded.radius`, 
-                [id, name, lat, lon, radius, color, createdBy, alarmSound, alarmVibration?1:0, isHome?1:0]);
+  await db.run(`INSERT INTO geofences (id, name, lat, lon, radius, color, createdBy, alarmSound, alarmVibration, isHome) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, radius=excluded.radius`, [id, name, lat, lon, radius, color, createdBy, alarmSound, alarmVibration?1:0, isHome?1:0]);
   res.sendStatus(201);
 });
 
@@ -218,25 +210,13 @@ app.delete("/geofences/:id", async (req, res) => {
   res.sendStatus(200);
 });
 
-/* --- WEBSOCKET & SERVER START --- */
-const server = app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
+const server = app.listen(PORT, () => console.log(`🚀 Port ${PORT}`));
 const wss = new WebSocketServer({ server });
+function broadcast(data) { wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(JSON.stringify(data)); }); }
 
-function broadcast(data) { 
-  wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(JSON.stringify(data)); }); 
-}
-
-/* --- HILFSFUNKTIONEN --- */
 async function sendPush(targetId, data) {
   const device = await db.get("SELECT fcmToken FROM device_tokens WHERE deviceId = ? COLLATE NOCASE", [targetId]);
   if (!device?.fcmToken) return;
-  const sData = {}; 
-  Object.keys(data).forEach(k => sData[k] = String(data[k]));
-  try { 
-    await admin.messaging().send({ 
-      token: device.fcmToken, 
-      data: sData, 
-      android: { priority: "high", ttl: 0 } 
-    }); 
-  } catch (e) { console.error("Push Fehler:", e.message); }
+  const sData = {}; Object.keys(data).forEach(k => sData[k] = String(data[k]));
+  try { await admin.messaging().send({ token: device.fcmToken, data: sData, android: { priority: "high", ttl: 0 } }); } catch (e) {}
 }
