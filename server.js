@@ -1,5 +1,5 @@
 /* ======================================================
-   🌐 SERVER.JS – FINALE VERSION (Anti-Jumping & Sync)
+   🌐 SERVER.JS – FINALE VERSION (Inkl. Unfall-Filter)
    ====================================================== */
 import express from "express";
 import cors from "cors";
@@ -50,7 +50,8 @@ try {
       lat REAL, lon REAL, speed REAL, battery INTEGER,
       accuracy REAL, name TEXT, timestamp INTEGER,
       alarmActive INTEGER DEFAULT 0, fcmToken TEXT,
-      isLocked INTEGER DEFAULT 0, isMotion INTEGER DEFAULT 0, isWifi INTEGER DEFAULT 0
+      isLocked INTEGER DEFAULT 0, isMotion INTEGER DEFAULT 0, isWifi INTEGER DEFAULT 0,
+      lastEvent TEXT
     );
     CREATE TABLE IF NOT EXISTS device_tokens (
       deviceId TEXT PRIMARY KEY COLLATE NOCASE,
@@ -86,7 +87,7 @@ try {
 
 /* --- API ROUTEN --- */
 
-// 1. STANDORT UPDATE (Mit Anti-Jumping & Alarm-Schutz)
+// 1. STANDORT UPDATE (Mit Unfall-Erkennung & Anti-Jumping)
 app.post("/location/update", async (req, res) => {
   const { 
     deviceId, lat, lon, speed, battery, accuracy, name, fcmToken, 
@@ -97,10 +98,10 @@ app.post("/location/update", async (req, res) => {
   const timestamp = deviceTs || Date.now();
 
   try {
-    // UPSERT mit Zeitstempel-Prüfung (Verhindert Zurückspringen bei Network-Jitter)
+    // UPSERT mit Zeitstempel-Prüfung
     await db.run(`
-      INSERT INTO devices (deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, alarmActive, isLocked, isMotion, isWifi)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+      INSERT INTO devices (deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, alarmActive, isLocked, isMotion, isWifi, lastEvent)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
       ON CONFLICT(deviceId) DO UPDATE SET
         lat = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.lat ELSE devices.lat END,
         lon = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.lon ELSE devices.lon END,
@@ -113,8 +114,9 @@ app.post("/location/update", async (req, res) => {
         isLocked = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.isLocked ELSE devices.isLocked END,
         isMotion = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.isMotion ELSE devices.isMotion END,
         isWifi = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.isWifi ELSE devices.isWifi END,
+        lastEvent = CASE WHEN excluded.timestamp >= devices.timestamp THEN excluded.lastEvent ELSE devices.lastEvent END,
         alarmActive = devices.alarmActive
-    `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, isLocked?1:0, isMotion?1:0, isWifi?1:0]);
+    `, [deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, isLocked?1:0, isMotion?1:0, isWifi?1:0, geofenceEvent]);
 
     if (fcmToken) {
       await db.run(`INSERT INTO device_tokens (deviceId, fcmToken, updatedAt) VALUES (?, ?, ?) ON CONFLICT(deviceId) DO UPDATE SET fcmToken=excluded.fcmToken, updatedAt=excluded.updatedAt`, [deviceId, fcmToken, timestamp]);
@@ -127,13 +129,25 @@ app.post("/location/update", async (req, res) => {
       deviceId, lat, lon, speed, battery, accuracy, name, timestamp, 
       status: "online", alarmActive: !!device?.alarmActive, 
       isLocked: !!isLocked, isMotion: !!isMotion, isWifi: !!isWifi, 
+      geofenceEvent,
       isWatched: !!watchers && watchers.size > 0 
     });
 
+    // 🔥 SPEZIAL-LOGIK für Events (Zonen & Unfall)
     if (geofenceEvent && geofenceEvent !== "heartbeat") {
+      const isAccident = geofenceEvent === "accident";
+      const pushTitle = isAccident ? "⚠️ KRITISCHER ALARM!" : "Zonen-Info";
+      const pushMessage = isAccident ? `UNFALL ERKANNT bei ${name || deviceId}!` : geofenceEvent;
+      const pushType = isAccident ? "accident_alert" : "geofence_event";
+
       const others = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
       for (const d of others) {
-        await sendPush(d.deviceId, { type: "geofence_event", title: "Zonen-Info", message: `${geofenceEvent}` });
+        await sendPush(d.deviceId, { 
+          type: pushType, 
+          title: pushTitle, 
+          message: pushMessage,
+          deviceId: deviceId 
+        });
       }
     }
     res.json({ status: "ok" });
