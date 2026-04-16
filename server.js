@@ -1,5 +1,5 @@
 /* ======================================================
-   🌐 SERVER.JS – FINALE VERSION (Inkl. Unfall-Filter)
+   🌐 SERVER.JS – VERSION 1.2 (Unfall-Erkennung mit Namen)
    ====================================================== */
 import express from "express";
 import cors from "cors";
@@ -65,29 +65,10 @@ try {
     CREATE INDEX IF NOT EXISTS idx_devices_timestamp ON devices(timestamp);
   `);
   console.log("✅ Datenbank bereit.");
-
-  // WATCHDOG: Alle 60 Sek prüfen
-  setInterval(async () => {
-    const now = Date.now();
-    for (const [targetId, lastActive] of lastWatchActivity.entries()) {
-      if (now - lastActive > 10 * 60 * 1000) {
-        activeWatchers.delete(targetId);
-        lastWatchActivity.delete(targetId);
-        await sendPush(targetId, { type: "watch_state", isWatched: "false" });
-        broadcast({ deviceId: targetId, isWatched: false, status: "online" });
-        continue;
-      }
-      const device = await db.get("SELECT timestamp FROM devices WHERE deviceId = ? COLLATE NOCASE", [targetId]);
-      if (device && (now - device.timestamp > 20 * 60 * 1000)) {
-        await sendPush(targetId, { type: "wakeup", title: "Verbindung prüfen", message: "Auto-Wakeup aktiv" });
-      }
-    }
-  }, 60000);
 })();
 
 /* --- API ROUTEN --- */
 
-// 1. STANDORT UPDATE (Mit Unfall-Erkennung & Anti-Jumping)
 app.post("/location/update", async (req, res) => {
   const { 
     deviceId, lat, lon, speed, battery, accuracy, name, fcmToken, 
@@ -98,7 +79,6 @@ app.post("/location/update", async (req, res) => {
   const timestamp = deviceTs || Date.now();
 
   try {
-    // UPSERT mit Zeitstempel-Prüfung
     await db.run(`
       INSERT INTO devices (deviceId, lat, lon, speed, battery, accuracy, name, timestamp, fcmToken, alarmActive, isLocked, isMotion, isWifi, lastEvent)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
@@ -133,11 +113,12 @@ app.post("/location/update", async (req, res) => {
       isWatched: !!watchers && watchers.size > 0 
     });
 
-    // 🔥 SPEZIAL-LOGIK für Events (Zonen & Unfall)
+    // 🔥 PUSH LOGIK FÜR EVENTS (Zonen & Unfall)
     if (geofenceEvent && geofenceEvent !== "heartbeat") {
       const isAccident = geofenceEvent === "accident";
+      const deviceName = name || deviceId; 
       const pushTitle = isAccident ? "⚠️ KRITISCHER ALARM!" : "Zonen-Info";
-      const pushMessage = isAccident ? `UNFALL ERKANNT bei ${name || deviceId}!` : geofenceEvent;
+      const pushMessage = isAccident ? `UNFALL ERKANNT bei ${deviceName}!` : `${deviceName}: ${geofenceEvent}`;
       const pushType = isAccident ? "accident_alert" : "geofence_event";
 
       const others = await db.all("SELECT deviceId FROM devices WHERE deviceId != ? COLLATE NOCASE", [deviceId]);
@@ -146,7 +127,8 @@ app.post("/location/update", async (req, res) => {
           type: pushType, 
           title: pushTitle, 
           message: pushMessage,
-          deviceId: deviceId 
+          senderId: deviceId,
+          senderName: deviceName
         });
       }
     }
@@ -154,7 +136,6 @@ app.post("/location/update", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 2. GERÄTELISTE ABRUFEN
 app.get("/devices", async (req, res) => {
   const rows = await db.all("SELECT * FROM devices");
   const now = Date.now();
@@ -169,7 +150,6 @@ app.get("/devices", async (req, res) => {
   })));
 });
 
-// 3. ALARM STEUERUNG
 app.post("/devices/:id/alarm", async (req, res) => {
   const active = req.query.active === "true";
   const deviceId = req.params.id.toLowerCase();
@@ -181,7 +161,6 @@ app.post("/devices/:id/alarm", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 4. WAKEUP & WATCHING
 app.post("/devices/:id/wakeup", async (req, res) => {
   await sendPush(req.params.id.toLowerCase(), { type: "wakeup", title: "System", message: "Standort erzwungen" });
   res.json({ status: "sent" });
@@ -207,7 +186,6 @@ app.post("/devices/:id/unwatch", async (req, res) => {
   res.sendStatus(200);
 });
 
-// 5. GEOFENCES
 app.get("/geofences", async (req, res) => {
   const rows = await db.all("SELECT * FROM geofences");
   res.json(rows.map(g => ({ ...g, alarmVibration: g.alarmVibration === 1, isHome: g.isHome === 1 })));
