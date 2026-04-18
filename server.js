@@ -12,146 +12,54 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: "*" }
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './devices.json';
 const AUDIO_DIR = './uploads/audio';
 
-// Sicherstellen, dass Verzeichnisse existieren
-if (!fs.existsSync(AUDIO_DIR)) {
-    fs.mkdirSync(AUDIO_DIR, { recursive: true });
-}
+if (!fs.existsSync(AUDIO_DIR)) fs.mkdirSync(AUDIO_DIR, { recursive: true });
 
-// Multer Konfiguration für Audio-Uploads
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, AUDIO_DIR);
-    },
+    destination: (req, file, cb) => cb(null, AUDIO_DIR),
     filename: (req, file, cb) => {
         const deviceId = req.body.deviceId || 'unknown';
-        const timestamp = Date.now();
-        cb(null, `audio_${deviceId}_${timestamp}.mp3`);
+        cb(null, `audio_${deviceId}_${Date.now()}.mp3`);
     }
 });
 const upload = multer({ storage: storage });
 
 app.use(bodyParser.json());
-app.use(express.static('public'));
 app.use('/uploads', express.static('uploads'));
 
 let devices = {};
-
-// Daten beim Start laden
 if (fs.existsSync(DATA_FILE)) {
-    try {
-        devices = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    } catch (e) {
-        console.error("Fehler beim Laden der devices.json", e);
-        devices = {};
-    }
+    try { devices = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch (e) { devices = {}; }
 }
-
-function saveDevices() {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(devices, null, 2));
-}
-
-// --- API ENDPUNKTE ---
 
 app.post('/location/update', (req, res) => {
     const data = req.body;
-    if (!data.deviceId) return res.status(400).send("Missing deviceId");
+    if (!data.deviceId) return res.sendStatus(400);
     const id = data.deviceId.toLowerCase();
-
-    devices[id] = {
-        ...devices[id],
-        ...data,
-        timestamp: Date.now(),
-        status: 'online'
-    };
-
-    saveDevices();
+    devices[id] = { ...devices[id], ...data, timestamp: Date.now(), status: 'online' };
+    fs.writeFileSync(DATA_FILE, JSON.stringify(devices, null, 2));
     io.emit('location_update', devices[id]);
     res.sendStatus(200);
 });
 
-app.get('/devices', (req, res) => {
-    res.json(Object.values(devices));
-});
-
-app.get('/devices/:id', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    if (devices[id]) {
-        res.json(devices[id]);
-    } else {
-        res.status(404).send('Gerät nicht gefunden');
-    }
-});
-
-app.post('/devices/:id/alarm', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    const active = req.query.active === 'true';
-
-    if (devices[id]) {
-        devices[id].alarmActive = active;
-        saveDevices();
-        io.emit('command', {
-            deviceId: id,
-            action: active ? 'START_ALARM' : 'STOP_ALARM'
-        });
-        res.sendStatus(200);
-    } else {
-        res.status(404).send('Gerät nicht gefunden');
-    }
-});
+app.get('/devices', (req, res) => res.json(Object.values(devices)));
 
 app.post('/devices/:id/audio-request', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    console.log(`🎤 Audio-Request für Gerät: ${id}`);
-    io.emit('command', {
-        deviceId: id,
-        action: 'START_RECORDING'
-    });
-    res.status(200).json({ message: "Recording command sent" });
+    io.emit('command', { deviceId: req.params.id.toLowerCase(), action: 'START_RECORDING' });
+    res.json({ message: "Sent" });
 });
 
 app.post('/audio/upload', upload.single('audio'), (req, res) => {
-    const deviceId = req.body.deviceId || 'unknown';
-    if (!req.file) return res.status(400).send("No file uploaded");
-    console.log(`✅ Audio empfangen von ${deviceId}: ${req.file.filename}`);
     io.emit('new_audio', {
-        deviceId: deviceId,
-        filename: req.file.filename,
-        url: `/uploads/audio/${req.file.filename}`,
-        timestamp: Date.now()
+        deviceId: req.body.deviceId,
+        url: `/uploads/audio/${req.file.filename}`
     });
     res.sendStatus(200);
 });
 
-app.post('/devices/wakeup-all', (req, res) => {
-    io.emit('command', { action: 'WAKE_UP' });
-    res.sendStatus(200);
-});
-
-app.post('/location/clear/:id', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    if (devices[id]) {
-        devices[id].history = [];
-        saveDevices();
-        io.emit('location_update', devices[id]);
-    }
-    res.sendStatus(200);
-});
-
-io.on('connection', (socket) => {
-    console.log('Ein Client hat sich verbunden');
-    socket.on('disconnect', () => {
-        console.log('Client getrennt');
-    });
-});
-
-server.listen(PORT, () => {
-    console.log(`🚀 Server läuft auf Port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`🚀 Server online auf Port ${PORT}`));
