@@ -1,5 +1,5 @@
 /* ======================================================
-   🌐 SERVER.JS – VERSION 1.2 (Unfall-Erkennung mit Namen)
+   🌐 SERVER.JS – VERSION 1.3 (Inkl. Audio-Streaming & Snippets)
    ====================================================== */
 import express from "express";
 import cors from "cors";
@@ -7,6 +7,9 @@ import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import admin from "firebase-admin";
 import { WebSocketServer, WebSocket } from "ws";
+import fs from "fs";
+import path from "path";
+import multer from "multer";
 
 const app = express();
 app.use(cors());
@@ -15,6 +18,22 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const activeWatchers = new Map(); 
 const lastWatchActivity = new Map();
+
+// --- AUDIO SETUP ---
+const audioDir = "./uploads/audio";
+if (!fs.existsSync(audioDir)) {
+  fs.mkdirSync(audioDir, { recursive: true });
+}
+
+// Multer Konfiguration: Speichert Dateien im audioDir unter ihrem Originalnamen
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, audioDir),
+  filename: (req, file, cb) => cb(null, file.originalname)
+});
+const upload = multer({ storage });
+
+// Macht den Audio-Ordner über http://server:3000/audio/... erreichbar
+app.use("/audio", express.static(audioDir));
 
 let db;
 
@@ -69,6 +88,40 @@ try {
 
 /* --- API ROUTEN --- */
 
+// --- AUDIO UPLOAD (Vom Handy) ---
+app.post("/audio/upload", upload.single("audio"), async (req, res) => {
+  const { deviceId } = req.body;
+  const file = req.file;
+
+  if (!file || !deviceId) return res.sendStatus(400);
+
+  console.log(`🎤 Audio empfangen von ${deviceId}: ${file.filename}`);
+
+  // Per WebSocket an alle Web-Interfaces melden, dass eine neue Aufnahme da ist
+  broadcast({
+    type: "new_audio",
+    deviceId: deviceId,
+    url: `/audio/${file.filename}`,
+    filename: file.filename,
+    timestamp: Date.now()
+  });
+
+  res.json({ status: "ok", path: file.filename });
+});
+
+// --- AUDIO LISTE (Für das Web-Interface / Admin) ---
+app.get("/audio/list/:deviceId", async (req, res) => {
+  const devId = req.params.deviceId.toLowerCase();
+  fs.readdir(audioDir, (err, files) => {
+    if (err) return res.status(500).json([]);
+    const filtered = files
+      .filter(f => f.toLowerCase().includes(devId))
+      .sort((a, b) => b.localeCompare(a)) // Neueste zuerst
+      .map(f => ({ name: f, url: `/audio/${f}` }));
+    res.json(filtered);
+  });
+});
+
 app.post("/location/update", async (req, res) => {
   const { 
     deviceId, lat, lon, speed, battery, accuracy, name, fcmToken, 
@@ -113,7 +166,6 @@ app.post("/location/update", async (req, res) => {
       isWatched: !!watchers && watchers.size > 0 
     });
 
-    // 🔥 PUSH LOGIK FÜR EVENTS (Zonen & Unfall)
     if (geofenceEvent && geofenceEvent !== "heartbeat") {
       const isAccident = geofenceEvent === "accident";
       const deviceName = name || deviceId; 
