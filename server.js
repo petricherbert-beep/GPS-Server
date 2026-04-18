@@ -1,5 +1,6 @@
 import express from 'express';
 import http from 'http';
+import cors from 'cors';
 import { Server } from 'socket.io';
 import bodyParser from 'body-parser';
 import fs from 'fs';
@@ -11,6 +12,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.use(cors({
+    origin: "*"
+}));
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: "*" }
