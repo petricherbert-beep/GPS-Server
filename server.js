@@ -20,6 +20,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './devices.json';
+const GEOFENCE_FILE = './geofences.json';
 const AUDIO_DIR = './uploads/audio';
 
 if (!fs.existsSync(AUDIO_DIR)) {
@@ -40,28 +41,66 @@ app.use(express.static('public'));
 app.use('/uploads', express.static('uploads'));
 
 let devices = {};
+let geofences = [];
 
+// Daten laden
 if (fs.existsSync(DATA_FILE)) {
     try {
         devices = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    } catch (e) {
-        console.error("Fehler beim Laden der devices.json", e);
-        devices = {};
-    }
+    } catch (e) { console.error("Fehler beim Laden der devices.json", e); devices = {}; }
+}
+
+if (fs.existsSync(GEOFENCE_FILE)) {
+    try {
+        geofences = JSON.parse(fs.readFileSync(GEOFENCE_FILE, 'utf8'));
+    } catch (e) { console.error("Fehler beim Laden der geofences.json", e); geofences = []; }
 }
 
 function saveDevices() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(devices, null, 2));
 }
 
+function saveGeofences() {
+    fs.writeFileSync(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+}
+
 // --- API ENDPUNKTE ---
+
+// Geofence Verwaltung (NEU!)
+app.get('/geofences', (req, res) => {
+    res.json(geofences);
+});
+
+app.post('/geofences', (req, res) => {
+    const gf = req.body;
+    if (!gf.id) gf.id = Date.now().toString();
+    
+    // Bestehenden Geofence aktualisieren oder neu hinzufügen
+    const index = geofences.findIndex(g => g.id === gf.id);
+    if (index !== -1) {
+        geofences[index] = gf;
+    } else {
+        geofences.push(gf);
+    }
+    
+    saveGeofences();
+    io.emit('geofences_updated', geofences);
+    res.status(201).json(gf);
+});
+
+app.delete('/geofences/:id', (req, res) => {
+    const id = req.params.id;
+    geofences = geofences.filter(g => g.id !== id);
+    saveGeofences();
+    io.emit('geofences_updated', geofences);
+    res.sendStatus(200);
+});
 
 app.post('/location/update', (req, res) => {
     const data = req.body;
     if (!data.deviceId) return res.status(400).send("Missing deviceId");
     const id = data.deviceId.toLowerCase();
 
-    // Alle Felder der App (inkl. Temperatur, Snapped-Koordinaten etc.) übernehmen
     devices[id] = {
         ...devices[id], 
         ...data,        
@@ -71,7 +110,7 @@ app.post('/location/update', (req, res) => {
     };
 
     saveDevices();
-    io.emit('location_update', devices[id]); // Sendet Update an alle Map-Clients via Socket.io
+    io.emit('location_update', devices[id]);
     res.sendStatus(200);
 });
 
@@ -85,29 +124,16 @@ app.get('/devices/:id', (req, res) => {
     else res.status(404).send('Gerät nicht gefunden');
 });
 
-// Alarm Steuerung (Modern)
+// Alarm Steuerung (Verbessert: Akzeptiert Query UND Body)
 app.post('/devices/:id/alarm', (req, res) => {
     const id = req.params.id.toLowerCase();
-    const active = req.query.active === 'true';
+    const active = req.query.active === 'true' || req.body.active === true;
     if (devices[id]) {
         devices[id].alarmActive = active;
         saveDevices();
         io.emit('command', { deviceId: id, action: active ? 'START_ALARM' : 'STOP_ALARM' });
         res.sendStatus(200);
     } else res.status(404).send('Gerät nicht gefunden');
-});
-
-// Alarm Steuerung (Legacy/Fallback für alte App-Versionen)
-app.post('/devices/:id/ring', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    io.emit('command', { deviceId: id, action: 'START_ALARM' });
-    res.sendStatus(200);
-});
-
-app.post('/devices/:id/reset-alarm', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    io.emit('command', { deviceId: id, action: 'STOP_ALARM' });
-    res.sendStatus(200);
 });
 
 // Audio Funktionen
@@ -129,12 +155,6 @@ app.post('/audio/upload', upload.single('audio'), (req, res) => {
     res.sendStatus(200);
 });
 
-// Globale Befehle
-app.post('/devices/wakeup-all', (req, res) => {
-    io.emit('command', { action: 'WAKE_UP' });
-    res.sendStatus(200);
-});
-
 app.post('/location/clear/:id', (req, res) => {
     const id = req.params.id.toLowerCase();
     if (devices[id]) {
@@ -146,7 +166,9 @@ app.post('/location/clear/:id', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-    console.log('Ein Client (Karte/App) ist via Socket.io verbunden:', socket.id);
+    console.log('Ein Client verbunden:', socket.id);
+    // Dem neuen Client sofort alle Daten senden
+    socket.emit('geofences_updated', geofences);
     socket.on('disconnect', () => { console.log('Client getrennt'); });
 });
 
