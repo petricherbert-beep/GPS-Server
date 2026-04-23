@@ -1,7 +1,6 @@
 import express from 'express';
 import http from 'http';
-import cors from 'cors';
-import { Server } from 'socket.io';
+import cors from 'cors';import { Server } from 'socket.io';
 import bodyParser from 'body-parser';
 import fs from 'fs';
 import path from 'path';
@@ -66,7 +65,7 @@ function saveGeofences() {
 
 // --- API ENDPUNKTE ---
 
-// Geofence Verwaltung (NEU!)
+// Geofences
 app.get('/geofences', (req, res) => {
     res.json(geofences);
 });
@@ -74,15 +73,12 @@ app.get('/geofences', (req, res) => {
 app.post('/geofences', (req, res) => {
     const gf = req.body;
     if (!gf.id) gf.id = Date.now().toString();
-    
-    // Bestehenden Geofence aktualisieren oder neu hinzufügen
     const index = geofences.findIndex(g => g.id === gf.id);
     if (index !== -1) {
         geofences[index] = gf;
     } else {
         geofences.push(gf);
     }
-    
     saveGeofences();
     io.emit('geofences_updated', geofences);
     res.status(201).json(gf);
@@ -96,21 +92,69 @@ app.delete('/geofences/:id', (req, res) => {
     res.sendStatus(200);
 });
 
+// Location Update
 app.post('/location/update', (req, res) => {
     const data = req.body;
     if (!data.deviceId) return res.status(400).send("Missing deviceId");
     const id = data.deviceId.toLowerCase();
 
+    // 🔥 WICHTIG: Server-Status für isWatched beibehalten
+    // Falls die App noch "true" sendet, der Server aber kein Watcher mehr hat, gewinnt der Server.
+    const currentIsWatched = devices[id] ? (devices[id].isWatched || false) : (data.isWatched || false);
+
     devices[id] = {
         ...devices[id], 
         ...data,        
         deviceId: id,
+        isWatched: currentIsWatched, // Server-Zustand überschreibt App-Zustand
         status: 'online',
         timestamp: Date.now()
     };
 
     saveDevices();
     io.emit('location_update', devices[id]);
+    res.sendStatus(200);
+});
+
+// Watch Management (NEU: Von der App benötigt!)
+app.post('/devices/:id/watch', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const watcherId = req.query.watcherId || "unknown";
+    
+    if (devices[id]) {
+        if (!devices[id].watchers) devices[id].watchers = {};
+        devices[id].watchers[watcherId] = Date.now();
+        devices[id].isWatched = true;
+        
+        saveDevices();
+        io.emit('location_update', devices[id]);
+        console.log(`[WATCH] ${watcherId} beobachtet jetzt ${id}`);
+        res.sendStatus(200);
+    } else res.status(404).send('Gerät nicht gefunden');
+});
+
+app.post('/devices/:id/unwatch', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const watcherId = req.query.watcherId || "unknown";
+    
+    if (devices[id] && devices[id].watchers) {
+        delete devices[id].watchers[watcherId];
+        
+        // Prüfen, ob noch andere Zuschauer da sind
+        const remainingWatchers = Object.keys(devices[id].watchers).length;
+        devices[id].isWatched = remainingWatchers > 0;
+        
+        saveDevices();
+        io.emit('location_update', devices[id]);
+        console.log(`[UNWATCH] ${watcherId} hat aufgehört ${id} zu beobachten. Restliche: ${remainingWatchers}`);
+        res.sendStatus(200);
+    } else {
+        res.sendStatus(200);
+    }
+});
+
+app.post('/devices/wakeup-all', (req, res) => {
+    io.emit('command', { action: 'WAKEUP_ALL' });
     res.sendStatus(200);
 });
 
@@ -124,7 +168,7 @@ app.get('/devices/:id', (req, res) => {
     else res.status(404).send('Gerät nicht gefunden');
 });
 
-// Alarm Steuerung (Verbessert: Akzeptiert Query UND Body)
+// Alarm
 app.post('/devices/:id/alarm', (req, res) => {
     const id = req.params.id.toLowerCase();
     const active = req.query.active === 'true' || req.body.active === true;
@@ -136,7 +180,7 @@ app.post('/devices/:id/alarm', (req, res) => {
     } else res.status(404).send('Gerät nicht gefunden');
 });
 
-// Audio Funktionen
+// Audio
 app.post('/devices/:id/audio-request', (req, res) => {
     const id = req.params.id.toLowerCase();
     io.emit('command', { deviceId: id, action: 'START_RECORDING' });
@@ -167,7 +211,6 @@ app.post('/location/clear/:id', (req, res) => {
 
 io.on('connection', (socket) => {
     console.log('Ein Client verbunden:', socket.id);
-    // Dem neuen Client sofort alle Daten senden
     socket.emit('geofences_updated', geofences);
     socket.on('disconnect', () => { console.log('Client getrennt'); });
 });
