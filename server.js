@@ -100,16 +100,17 @@ app.post('/location/update', (req, res) => {
 
     // 🔥 WICHTIG: Server-Status für isWatched beibehalten
     // Falls die App noch "true" sendet, der Server aber kein Watcher mehr hat, gewinnt der Server.
-    const currentIsWatched = devices[id] ? (devices[id].isWatched || false) : (data.isWatched || false);
+   const existingWatchers = devices[id]?.watchers || {};
+  const isWatched = Object.keys(existingWatchers).length > 0;
 
-    devices[id] = {
-        ...devices[id], 
-        ...data,        
-        deviceId: id,
-        isWatched: currentIsWatched, // Server-Zustand überschreibt App-Zustand
-        status: 'online',
-        timestamp: data.timestamp || Date.now() 
-    };
+   devices[id] = {
+    ...devices[id],
+    ...data,
+    deviceId: id,
+    isWatched: isWatched,   // 🔥 nur aus watchers berechnet
+    status: 'online',
+    timestamp: data.timestamp || Date.now()
+};
 
     saveDevices();
     io.emit('location_update', devices[id]);
