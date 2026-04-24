@@ -1,6 +1,7 @@
 import express from 'express';
 import http from 'http';
-import cors from 'cors';import { Server } from 'socket.io';
+import cors from 'cors';
+import { Server } from 'socket.io';
 import bodyParser from 'body-parser';
 import fs from 'fs';
 import path from 'path';
@@ -42,7 +43,7 @@ app.use('/uploads', express.static('uploads'));
 let devices = {};
 let geofences = [];
 
-// Daten laden
+// --- DATEN LADEN ---
 if (fs.existsSync(DATA_FILE)) {
     try {
         devices = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
@@ -92,68 +93,71 @@ app.delete('/geofences/:id', (req, res) => {
     res.sendStatus(200);
 });
 
-// Location Update
+// --- LOCATION UPDATE (FIX 3) ---
 app.post('/location/update', (req, res) => {
     const data = req.body;
     if (!data.deviceId) return res.status(400).send("Missing deviceId");
     const id = data.deviceId.toLowerCase();
 
-    // 🔥 WICHTIG: Server-Status für isWatched beibehalten
-    // Falls die App noch "true" sendet, der Server aber kein Watcher mehr hat, gewinnt der Server.
-   const existingWatchers = devices[id]?.watchers || {};
-  const isWatched = Object.keys(existingWatchers).length > 0;
+    // Sicherstellen, dass Objekt und Watchers existieren
+    if (!devices[id]) devices[id] = { watchers: {} };
+    if (!devices[id].watchers) devices[id].watchers = {};
 
-   devices[id] = {
-    ...devices[id],
-    ...data,
-    deviceId: id,
-    isWatched: isWatched,   // 🔥 nur aus watchers berechnet
-    status: 'online',
-    timestamp: data.timestamp || Date.now()
-};
+    // Server berechnet isWatched selbst basierend auf der Watcher-Liste
+    const isWatched = Object.keys(devices[id].watchers).length > 0;
+
+    devices[id] = {
+        ...devices[id],
+        ...data,
+        deviceId: id,
+        isWatched: isWatched,   // 🔥 Server-Wahrheit überschreibt App-Flag
+        status: 'online',
+        timestamp: data.timestamp || Date.now()
+    };
 
     saveDevices();
     io.emit('location_update', devices[id]);
     res.sendStatus(200);
 });
 
-// Watch Management (NEU: Von der App benötigt!)
+// --- WATCH MANAGEMENT (FIX 1 & 2) ---
 app.post('/devices/:id/watch', (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
+
+    if (!devices[id]) return res.status(404).send('Gerät nicht gefunden');
+    if (!devices[id].watchers) devices[id].watchers = {};
+
+    devices[id].watchers[watcherId] = Date.now();
     
-    if (devices[id]) {
-        if (!devices[id].watchers) devices[id].watchers = {};
-        devices[id].watchers[watcherId] = Date.now();
-        devices[id].isWatched = true;
-        
-        saveDevices();
-        io.emit('location_update', devices[id]);
-        console.log(`[WATCH] ${watcherId} beobachtet jetzt ${id}`);
-        res.sendStatus(200);
-    } else res.status(404).send('Gerät nicht gefunden');
+    // isWatched ist nur true, wenn die Liste nicht leer ist
+    devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
+
+    saveDevices();
+    io.emit('location_update', devices[id]);
+    console.log(`[WATCH] ${watcherId} beobachtet ${id}`);
+    res.sendStatus(200);
 });
 
 app.post('/devices/:id/unwatch', (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
-    
-    if (devices[id] && devices[id].watchers) {
-        delete devices[id].watchers[watcherId];
-        
-        // Prüfen, ob noch andere Zuschauer da sind
-        const remainingWatchers = Object.keys(devices[id].watchers).length;
-        devices[id].isWatched = remainingWatchers > 0;
-        
-        saveDevices();
-        io.emit('location_update', devices[id]);
-        console.log(`[UNWATCH] ${watcherId} hat aufgehört ${id} zu beobachten. Restliche: ${remainingWatchers}`);
-        res.sendStatus(200);
-    } else {
-        res.sendStatus(200);
-    }
+
+    if (!devices[id]) return res.sendStatus(200);
+    if (!devices[id].watchers) devices[id].watchers = {};
+
+    delete devices[id].watchers[watcherId];
+
+    // Konsistente Neuberechnung
+    devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
+
+    saveDevices();
+    io.emit('location_update', devices[id]);
+    console.log(`[UNWATCH] ${watcherId} -> ${id}`);
+    res.sendStatus(200);
 });
 
+// --- SONSTIGE GERÄTE-STEUERUNG ---
 app.post('/devices/wakeup-all', (req, res) => {
     io.emit('command', { action: 'WAKEUP_ALL' });
     res.sendStatus(200);
@@ -169,7 +173,6 @@ app.get('/devices/:id', (req, res) => {
     else res.status(404).send('Gerät nicht gefunden');
 });
 
-// Alarm
 app.post('/devices/:id/alarm', (req, res) => {
     const id = req.params.id.toLowerCase();
     const active = req.query.active === 'true' || req.body.active === true;
@@ -181,7 +184,7 @@ app.post('/devices/:id/alarm', (req, res) => {
     } else res.status(404).send('Gerät nicht gefunden');
 });
 
-// Audio
+// --- AUDIO & CLEANUP ---
 app.post('/devices/:id/audio-request', (req, res) => {
     const id = req.params.id.toLowerCase();
     io.emit('command', { deviceId: id, action: 'START_RECORDING' });
@@ -210,8 +213,39 @@ app.post('/location/clear/:id', (req, res) => {
     res.sendStatus(200);
 });
 
+// --- STALE WATCHER CLEANUP (AUTOMATISCH) ---
+setInterval(() => {
+    const now = Date.now();
+    const STALE_TIMEOUT = 10 * 60 * 1000; // 10 Minuten Inaktivität
+    let changed = false;
+
+    Object.keys(devices).forEach(deviceId => {
+        const dev = devices[deviceId];
+        if (dev.watchers) {
+            const watcherIds = Object.keys(dev.watchers);
+            watcherIds.forEach(wId => {
+                if (now - dev.watchers[wId] > STALE_TIMEOUT) {
+                    console.log(`[CLEANUP] Entferne inaktiven Watcher ${wId} von ${deviceId}`);
+                    delete dev.watchers[wId];
+                    changed = true;
+                }
+            });
+
+            const newIsWatched = Object.keys(dev.watchers).length > 0;
+            if (dev.isWatched !== newIsWatched) {
+                dev.isWatched = newIsWatched;
+                changed = true;
+                io.emit('location_update', dev);
+            }
+        }
+    });
+
+    if (changed) saveDevices();
+}, 60000); // Prüfung jede Minute
+
+// --- SOCKET.IO ---
 io.on('connection', (socket) => {
-    console.log('Ein Client verbunden:', socket.id);
+    console.log('Client verbunden:', socket.id);
     socket.emit('geofences_updated', geofences);
     socket.on('disconnect', () => { console.log('Client getrennt'); });
 });
