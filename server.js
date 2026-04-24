@@ -108,7 +108,7 @@ app.post('/location/update', (req, res) => {
         deviceId: id,
         isWatched: currentIsWatched, // Server-Zustand überschreibt App-Zustand
         status: 'online',
-        timestamp: Date.now()
+        timestamp: data.timestamp || Date.now() 
     };
 
     saveDevices();
