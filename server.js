@@ -3,7 +3,7 @@ import http from 'http';
 import cors from 'cors';
 import { Server } from 'socket.io';
 import bodyParser from 'body-parser';
-import fs from 'fs';
+import fs from 'fs/promises';
 import path from 'path';
 import multer from 'multer';
 import { fileURLToPath } from 'url';
@@ -14,137 +14,59 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cors({ origin: "*" }));
 const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: "*" }
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './devices.json';
 const GEOFENCE_FILE = './geofences.json';
-const AUDIO_DIR = './uploads/audio';
 
-if (!fs.existsSync(AUDIO_DIR)) {
-    fs.mkdirSync(AUDIO_DIR, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => { cb(null, AUDIO_DIR); },
-    filename: (req, file, cb) => {
-        const deviceId = req.body.deviceId || 'unknown';
-        cb(null, `audio_${deviceId}_${Date.now()}.mp3`);
-    }
-});
-const upload = multer({ storage: storage });
-
-// Standard JSON Parser
+// Standard Middlewares
 app.use(bodyParser.json());
-// Spezial-Parser für Binär-Daten (Phase 6)
 app.use('/location/binary', bodyParser.raw({ type: 'application/octet-stream', limit: '50kb' }));
-
 app.use(express.static('public'));
 app.use('/uploads', express.static('uploads'));
 
 let devices = {};
 let geofences = [];
 
-// --- DATEN LADEN ---
-if (fs.existsSync(DATA_FILE)) {
+// --- DATEN ASYNCHRON LADEN ---
+async function init() {
     try {
-        devices = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    } catch (e) { console.error("Fehler beim Laden der devices.json", e); devices = {}; }
-}
-
-if (fs.existsSync(GEOFENCE_FILE)) {
+        const devData = await fs.readFile(DATA_FILE, 'utf8');
+        devices = JSON.parse(devData);
+    } catch (e) { devices = {}; }
+    
     try {
-        geofences = JSON.parse(fs.readFileSync(GEOFENCE_FILE, 'utf8'));
-    } catch (e) { console.error("Fehler beim Laden der geofences.json", e); geofences = []; }
+        const geoData = await fs.readFile(GEOFENCE_FILE, 'utf8');
+        geofences = JSON.parse(geoData);
+    } catch (e) { geofences = []; }
+}
+init();
+
+async function saveDevices() {
+    try { await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2)); } catch (e) { console.error("Save Error", e); }
 }
 
-function saveDevices() {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(devices, null, 2));
-}
-
-function saveGeofences() {
-    fs.writeFileSync(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+async function saveGeofences() {
+    try { await fs.writeFile(GEOFENCE_FILE, JSON.stringify(geofences, null, 2)); } catch (e) { console.error("Save Error", e); }
 }
 
 // --- API ENDPUNKTE ---
 
-// Geofences
-app.get('/geofences', (req, res) => {
-    res.json(geofences);
-});
+app.get('/geofences', (req, res) => res.json(geofences));
 
-app.post('/geofences', (req, res) => {
+app.post('/geofences', async (req, res) => {
     const gf = req.body;
     if (!gf.id) gf.id = Date.now().toString();
     const index = geofences.findIndex(g => g.id === gf.id);
-    if (index !== -1) geofences[index] = gf;
-    else geofences.push(gf);
-    saveGeofences();
+    if (index !== -1) geofences[index] = gf; else geofences.push(gf);
+    await saveGeofences();
     io.emit('geofences_updated', geofences);
     res.status(201).json(gf);
 });
 
-app.delete('/geofences/:id', (req, res) => {
-    geofences = geofences.filter(g => g.id !== req.params.id);
-    saveGeofences();
-    io.emit('geofences_updated', geofences);
-    res.sendStatus(200);
-});
-
-// --- LOCATION UPDATE (JSON EINZELN) ---
-app.post('/location/update', (req, res) => {
-    const data = req.body;
-    if (!data.deviceId) return res.status(400).send("Missing deviceId");
-    const id = data.deviceId.toLowerCase();
-
-    if (!devices[id]) devices[id] = { watchers: {} };
-    const isWatched = devices[id].watchers ? Object.keys(devices[id].watchers).length > 0 : false;
-
-    devices[id] = {
-        ...devices[id],
-        ...data,
-        deviceId: id,
-        isWatched: isWatched,
-        status: 'online',
-        timestamp: data.timestamp || Date.now()
-    };
-
-    saveDevices();
-    io.emit('location_update', devices[id]);
-    res.sendStatus(200);
-});
-
-// --- LOCATION UPDATE (JSON BATCH) ---
-app.post('/location/update-batch', (req, res) => {
-    const batch = req.body;
-    if (!Array.isArray(batch) || batch.length === 0) return res.sendStatus(200);
-    
-    let lastId = "";
-    batch.forEach(data => {
-        const id = data.deviceId.toLowerCase();
-        lastId = id;
-        if (!devices[id]) devices[id] = { watchers: {} };
-        const isWatched = devices[id].watchers ? Object.keys(devices[id].watchers).length > 0 : false;
-        
-        devices[id] = {
-            ...devices[id],
-            ...data,
-            deviceId: id,
-            isWatched: isWatched,
-            status: 'online',
-            timestamp: data.timestamp || Date.now()
-        };
-    });
-    
-    saveDevices();
-    if (lastId) io.emit('location_update', devices[lastId]);
-    res.sendStatus(200);
-});
-
-// --- LOCATION UPDATE (BINARY - MAXIMALER AKKUSCHUTZ) ---
-app.post('/location/binary', (req, res) => {
+// --- BINARY LOCATION (FIXED-POINT OPTIMIERUNG) ---
+app.post('/location/binary', async (req, res) => {
     const buffer = req.body;
     if (!Buffer.isBuffer(buffer) || buffer.length < 5) return res.sendStatus(400);
 
@@ -155,11 +77,12 @@ app.post('/location/binary', (req, res) => {
         offset += idLen;
         const count = buffer.readUInt8(offset++);
 
+        let lastDev = null;
         for (let i = 0; i < count; i++) {
             const timestamp = Number(buffer.readBigInt64LE(offset)); offset += 8;
-            const lat = buffer.readDoubleLE(offset); offset += 8;
-            const lon = buffer.readDoubleLE(offset); offset += 8;
-            const accuracy = buffer.readFloatLE(offset); offset += 4;
+            const lat = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
+            const lon = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
+            const accuracy = buffer.readUInt16LE(offset) / 10.0; offset += 2;
             const battery = buffer.readUInt8(offset++);
             const flags = buffer.readUInt8(offset++);
 
@@ -176,10 +99,14 @@ app.post('/location/binary', (req, res) => {
                 isLocked, isMotion: isMoving, isWifi, isWatched,
                 status: 'online'
             };
+            lastDev = devices[deviceId];
         }
 
-        saveDevices();
-        io.emit('location_update', devices[deviceId]);
+        await saveDevices();
+        if (lastDev) {
+            // 🔥 ROOM-OPTIMIERUNG: Sende nur an Leute, die dieses Gerät beobachten
+            io.to(deviceId).emit('location_update', lastDev);
+        }
         res.sendStatus(200);
     } catch (e) {
         console.error("Binary Parse Error:", e);
@@ -187,122 +114,36 @@ app.post('/location/binary', (req, res) => {
     }
 });
 
-// --- WATCH MANAGEMENT ---
-app.post('/devices/:id/watch', (req, res) => {
+// --- WATCH MANAGEMENT (MIT ROOMS) ---
+app.post('/devices/:id/watch', async (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
 
-    if (!devices[id]) return res.status(404).send('Gerät nicht gefunden');
+    if (!devices[id]) return res.status(404).send('Not found');
     if (!devices[id].watchers) devices[id].watchers = {};
 
     devices[id].watchers[watcherId] = Date.now();
-    devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
+    devices[id].isWatched = true;
 
-    saveDevices();
-    io.emit('location_update', devices[id]);
+    await saveDevices();
+    io.to(id).emit('location_update', devices[id]);
     res.sendStatus(200);
 });
 
-app.post('/devices/:id/unwatch', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    const watcherId = req.query.watcherId || "unknown";
-
-    if (devices[id] && devices[id].watchers) {
-        delete devices[id].watchers[watcherId];
-        devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
-        saveDevices();
-        io.emit('location_update', devices[id]);
-    }
-    res.sendStatus(200);
-});
-
-// --- GERÄTE-STEUERUNG ---
-app.post('/devices/wakeup-all', (req, res) => {
-    io.emit('command', { action: 'WAKEUP_ALL' });
-    res.sendStatus(200);
-});
-
-app.get('/devices', (req, res) => {
-    res.json(Object.values(devices));
-});
-
-app.get('/devices/:id', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    if (devices[id]) res.json(devices[id]);
-    else res.status(404).send('Gerät nicht gefunden');
-});
-
-app.post('/devices/:id/alarm', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    const active = req.query.active === 'true' || req.body.active === true;
-    if (devices[id]) {
-        devices[id].alarmActive = active;
-        saveDevices();
-        io.emit('command', { deviceId: id, action: active ? 'START_ALARM' : 'STOP_ALARM' });
-        res.sendStatus(200);
-    } else res.status(404).send('Gerät nicht gefunden');
-});
-
-// --- AUDIO & CLEANUP ---
-app.post('/devices/:id/audio-request', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    io.emit('command', { deviceId: id, action: 'START_RECORDING' });
-    res.status(200).json({ message: "Recording command sent" });
-});
-
-app.post('/audio/upload', upload.single('audio'), (req, res) => {
-    const deviceId = req.body.deviceId || 'unknown';
-    if (!req.file) return res.status(400).send("No file uploaded");
-    io.emit('new_audio', {
-        deviceId: deviceId,
-        filename: req.file.filename,
-        url: `/uploads/audio/${req.file.filename}`,
-        timestamp: Date.now()
-    });
-    res.sendStatus(200);
-});
-
-app.post('/location/clear/:id', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    if (devices[id]) {
-        devices[id].history = [];
-        saveDevices();
-        io.emit('location_update', devices[id]);
-    }
-    res.sendStatus(200);
-});
-
-// --- STALE WATCHER CLEANUP ---
-setInterval(() => {
-    const now = Date.now();
-    const STALE_TIMEOUT = 10 * 60 * 1000;
-    let changed = false;
-
-    Object.keys(devices).forEach(deviceId => {
-        const dev = devices[deviceId];
-        if (dev.watchers) {
-            const watcherIds = Object.keys(dev.watchers);
-            watcherIds.forEach(wId => {
-                if (now - dev.watchers[wId] > STALE_TIMEOUT) {
-                    delete dev.watchers[wId];
-                    changed = true;
-                }
-            });
-            const newIsWatched = Object.keys(dev.watchers).length > 0;
-            if (dev.isWatched !== newIsWatched) {
-                dev.isWatched = newIsWatched;
-                changed = true;
-                io.emit('location_update', dev);
-            }
-        }
-    });
-    if (changed) saveDevices();
-}, 60000);
-
+// --- SOCKET.IO ROOM HANDLING ---
 io.on('connection', (socket) => {
-    socket.emit('geofences_updated', geofences);
+    // Wenn eine App ein Gerät beobachten will, tritt sie dem Raum bei
+    socket.on('join_device', (deviceId) => {
+        const id = deviceId.toLowerCase();
+        socket.join(id);
+        console.log(`Socket ${socket.id} joined room ${id}`);
+    });
+
+    socket.on('leave_device', (deviceId) => {
+        socket.leave(deviceId.toLowerCase());
+    });
 });
 
 server.listen(PORT, () => {
-    console.log(`🚀 Tracker-Server läuft auf Port ${PORT} (JSON, Batch & Binary Support)`);
+    console.log(`🚀 Ultra-Efficient Server auf Port ${PORT}`);
 });
