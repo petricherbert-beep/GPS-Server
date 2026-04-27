@@ -19,23 +19,67 @@ const io = new Server(server, { cors: { origin: "*" } });
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './devices.json';
 const GEOFENCE_FILE = './geofences.json';
+const AUDIO_DIR = './uploads/audio';
 
+// --- MIDDLEWARES ---
 app.use(bodyParser.json());
 app.use('/location/binary', bodyParser.raw({ type: 'application/octet-stream', limit: '50kb' }));
 app.use(express.static('public'));
+app.use('/uploads', express.static('uploads'));
 
 let devices = {};
 let geofences = [];
 
+// --- DATEN ASYNCHRON LADEN ---
 async function init() {
-    try { devices = JSON.parse(await fs.readFile(DATA_FILE, 'utf8')); } catch (e) { devices = {}; }
-    try { geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8')); } catch (e) { geofences = []; }
+    try {
+        const devData = await fs.readFile(DATA_FILE, 'utf8');
+        devices = JSON.parse(devData);
+    } catch (e) { devices = {}; }
+    
+    try {
+        const geoData = await fs.readFile(GEOFENCE_FILE, 'utf8');
+        geofences = JSON.parse(geoData);
+    } catch (e) { geofences = []; }
 }
 init();
 
-async function saveDevices() { await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2)); }
+async function saveDevices() {
+    try { await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2)); } catch (e) { console.error("Save Error", e); }
+}
 
-// --- ULTRA-BINARY DECODER (PHASE 7) ---
+async function saveGeofences() {
+    try { await fs.writeFile(GEOFENCE_FILE, JSON.stringify(geofences, null, 2)); } catch (e) { console.error("Save Error", e); }
+}
+
+// --- API ENDPUNKTE ---
+
+// 1. GEOFENCES
+app.get('/geofences', (req, res) => res.json(geofences));
+
+app.post('/geofences', async (req, res) => {
+    const gf = req.body;
+    if (!gf.id) gf.id = Date.now().toString();
+    const index = geofences.findIndex(g => g.id === gf.id);
+    if (index !== -1) geofences[index] = gf; else geofences.push(gf);
+    await saveGeofences();
+    io.emit('geofences_updated', geofences);
+    res.status(201).json(gf);
+});
+
+app.delete('/geofences/:id', async (req, res) => {
+    geofences = geofences.filter(g => g.id !== req.params.id);
+    await saveGeofences();
+    io.emit('geofences_updated', geofences);
+    res.sendStatus(200);
+});
+
+// 2. GERÄTE-LISTEN
+app.get('/devices', (req, res) => {
+    res.json(Object.values(devices));
+});
+
+// 3. ULTRA-BINARY DECODER (PHASE 7 - 7 BYTES PER POINT)
 app.post('/location/binary', async (req, res) => {
     const buffer = req.body;
     if (!Buffer.isBuffer(buffer) || buffer.length < 5) return res.sendStatus(400);
@@ -53,7 +97,6 @@ app.post('/location/binary', async (req, res) => {
             let lat, lon, ts, accuracy, battery, flags;
 
             if (i === 0) {
-                // Punkt 0 ist IMMER der Base-Frame (Absolute Werte, 20 Bytes)
                 ts = Number(buffer.readBigInt64LE(offset)); offset += 8;
                 lat = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
                 lon = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
@@ -61,7 +104,6 @@ app.post('/location/binary', async (req, res) => {
                 battery = buffer.readUInt8(offset++);
                 flags = buffer.readUInt8(offset++);
             } else {
-                // Punkte 1..N sind Delta-Frames (7 Bytes!)
                 const dt = buffer.readUInt16LE(offset); offset += 2;
                 const dLat = buffer.readInt16LE(offset); offset += 2;
                 const dLon = buffer.readInt16LE(offset); offset += 2;
@@ -70,7 +112,6 @@ app.post('/location/binary', async (req, res) => {
                 ts = lastTs + dt;
                 lat = lastLat + (dLat / 100000.0);
                 lon = lastLon + (dLon / 100000.0);
-                // Batterie und Genauigkeit behalten wir vom Base-Frame oder Flags
                 battery = devices[deviceId]?.battery || 0;
                 accuracy = devices[deviceId]?.accuracy || 10.0;
             }
@@ -92,15 +133,62 @@ app.post('/location/binary', async (req, res) => {
         await saveDevices();
         io.to(deviceId).emit('location_update', devices[deviceId]);
         res.sendStatus(200);
-    } catch (e) { res.sendStatus(500); }
+    } catch (e) { 
+        console.error("Binary Parse Error:", e);
+        res.sendStatus(500); 
+    }
 });
 
-// (Rest der Standard-Endpunkte wie /devices etc. bitte beibehalten)
-app.get('/devices', (req, res) => res.json(Object.values(devices)));
+// 4. WATCH MANAGEMENT (FIXED)
 app.post('/devices/:id/watch', async (req, res) => {
     const id = req.params.id.toLowerCase();
-    socketJoin(id, req.query.watcherId);
+    const watcherId = req.query.watcherId || "unknown";
+
+    if (!devices[id]) devices[id] = { watchers: {} };
+    if (!devices[id].watchers) devices[id].watchers = {};
+    
+    devices[id].watchers[watcherId] = Date.now();
+    devices[id].isWatched = true;
+
+    await saveDevices();
+    io.to(id).emit('location_update', devices[id]);
     res.sendStatus(200);
 });
 
-server.listen(PORT, () => console.log(`🚀 Ultra-Stream Server auf Port ${PORT}`));
+app.post('/devices/:id/unwatch', async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const watcherId = req.query.watcherId || "unknown";
+    if (devices[id] && devices[id].watchers) {
+        delete devices[id].watchers[watcherId];
+        devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
+        await saveDevices();
+        io.to(id).emit('location_update', devices[id]);
+    }
+    res.sendStatus(200);
+});
+
+// 5. STEUERUNG (ALARM)
+app.post('/devices/:id/alarm', async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const active = req.query.active === 'true' || req.body.active === true;
+    if (devices[id]) {
+        devices[id].alarmActive = active;
+        await saveDevices();
+        io.to(id).emit('command', { deviceId: id, action: active ? 'START_ALARM' : 'STOP_ALARM' });
+        res.sendStatus(200);
+    } else res.status(404).send('Not found');
+});
+
+// --- SOCKET.IO ROOMS ---
+io.on('connection', (socket) => {
+    socket.on('join_device', (deviceId) => {
+        socket.join(deviceId.toLowerCase());
+    });
+    socket.on('leave_device', (deviceId) => {
+        socket.leave(deviceId.toLowerCase());
+    });
+});
+
+server.listen(PORT, () => {
+    console.log(`🚀 Ultra-Efficient Server online auf Port ${PORT}`);
+});
