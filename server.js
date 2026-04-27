@@ -36,7 +36,11 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
+// Standard JSON Parser
 app.use(bodyParser.json());
+// Spezial-Parser für Binär-Daten (Phase 6)
+app.use('/location/binary', bodyParser.raw({ type: 'application/octet-stream', limit: '50kb' }));
+
 app.use(express.static('public'));
 app.use('/uploads', express.static('uploads'));
 
@@ -75,34 +79,28 @@ app.post('/geofences', (req, res) => {
     const gf = req.body;
     if (!gf.id) gf.id = Date.now().toString();
     const index = geofences.findIndex(g => g.id === gf.id);
-    if (index !== -1) {
-        geofences[index] = gf;
-    } else {
-        geofences.push(gf);
-    }
+    if (index !== -1) geofences[index] = gf;
+    else geofences.push(gf);
     saveGeofences();
     io.emit('geofences_updated', geofences);
     res.status(201).json(gf);
 });
 
 app.delete('/geofences/:id', (req, res) => {
-    const id = req.params.id;
-    geofences = geofences.filter(g => g.id !== id);
+    geofences = geofences.filter(g => g.id !== req.params.id);
     saveGeofences();
     io.emit('geofences_updated', geofences);
     res.sendStatus(200);
 });
 
-// --- LOCATION UPDATE (EINZELN) ---
+// --- LOCATION UPDATE (JSON EINZELN) ---
 app.post('/location/update', (req, res) => {
     const data = req.body;
     if (!data.deviceId) return res.status(400).send("Missing deviceId");
     const id = data.deviceId.toLowerCase();
 
     if (!devices[id]) devices[id] = { watchers: {} };
-    if (!devices[id].watchers) devices[id].watchers = {};
-
-    const isWatched = Object.keys(devices[id].watchers).length > 0;
+    const isWatched = devices[id].watchers ? Object.keys(devices[id].watchers).length > 0 : false;
 
     devices[id] = {
         ...devices[id],
@@ -118,7 +116,7 @@ app.post('/location/update', (req, res) => {
     res.sendStatus(200);
 });
 
-// --- BATCH LOCATION UPDATE (NEU: FIXXT 404 FEHLER) ---
+// --- LOCATION UPDATE (JSON BATCH) ---
 app.post('/location/update-batch', (req, res) => {
     const batch = req.body;
     if (!Array.isArray(batch) || batch.length === 0) return res.sendStatus(200);
@@ -128,9 +126,8 @@ app.post('/location/update-batch', (req, res) => {
         const id = data.deviceId.toLowerCase();
         lastId = id;
         if (!devices[id]) devices[id] = { watchers: {} };
-        if (!devices[id].watchers) devices[id].watchers = {};
+        const isWatched = devices[id].watchers ? Object.keys(devices[id].watchers).length > 0 : false;
         
-        const isWatched = Object.keys(devices[id].watchers).length > 0;
         devices[id] = {
             ...devices[id],
             ...data,
@@ -142,11 +139,52 @@ app.post('/location/update-batch', (req, res) => {
     });
     
     saveDevices();
-    if (lastId && devices[lastId]) {
-        io.emit('location_update', devices[lastId]);
-    }
-    console.log(`[BATCH] ${batch.length} Punkte von ${lastId} empfangen`);
+    if (lastId) io.emit('location_update', devices[lastId]);
     res.sendStatus(200);
+});
+
+// --- LOCATION UPDATE (BINARY - MAXIMALER AKKUSCHUTZ) ---
+app.post('/location/binary', (req, res) => {
+    const buffer = req.body;
+    if (!Buffer.isBuffer(buffer) || buffer.length < 5) return res.sendStatus(400);
+
+    try {
+        let offset = 0;
+        const idLen = buffer.readUInt8(offset++);
+        const deviceId = buffer.toString('utf8', offset, offset + idLen).toLowerCase();
+        offset += idLen;
+        const count = buffer.readUInt8(offset++);
+
+        for (let i = 0; i < count; i++) {
+            const timestamp = Number(buffer.readBigInt64LE(offset)); offset += 8;
+            const lat = buffer.readDoubleLE(offset); offset += 8;
+            const lon = buffer.readDoubleLE(offset); offset += 8;
+            const accuracy = buffer.readFloatLE(offset); offset += 4;
+            const battery = buffer.readUInt8(offset++);
+            const flags = buffer.readUInt8(offset++);
+
+            const isLocked = (flags & 1) !== 0;
+            const isMoving = (flags & 2) !== 0;
+            const isWifi = (flags & 4) !== 0;
+
+            if (!devices[deviceId]) devices[deviceId] = { watchers: {} };
+            const isWatched = devices[deviceId].watchers ? Object.keys(devices[deviceId].watchers).length > 0 : false;
+
+            devices[deviceId] = {
+                ...devices[deviceId],
+                deviceId, lat, lon, timestamp, accuracy, battery, 
+                isLocked, isMotion: isMoving, isWifi, isWatched,
+                status: 'online'
+            };
+        }
+
+        saveDevices();
+        io.emit('location_update', devices[deviceId]);
+        res.sendStatus(200);
+    } catch (e) {
+        console.error("Binary Parse Error:", e);
+        res.sendStatus(500);
+    }
 });
 
 // --- WATCH MANAGEMENT ---
@@ -162,7 +200,6 @@ app.post('/devices/:id/watch', (req, res) => {
 
     saveDevices();
     io.emit('location_update', devices[id]);
-    console.log(`[WATCH] ${watcherId} beobachtet ${id}`);
     res.sendStatus(200);
 });
 
@@ -170,15 +207,12 @@ app.post('/devices/:id/unwatch', (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
 
-    if (!devices[id]) return res.sendStatus(200);
-    if (!devices[id].watchers) devices[id].watchers = {};
-
-    delete devices[id].watchers[watcherId];
-    devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
-
-    saveDevices();
-    io.emit('location_update', devices[id]);
-    console.log(`[UNWATCH] ${watcherId} -> ${id}`);
+    if (devices[id] && devices[id].watchers) {
+        delete devices[id].watchers[watcherId];
+        devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
+        saveDevices();
+        io.emit('location_update', devices[id]);
+    }
     res.sendStatus(200);
 });
 
@@ -238,7 +272,7 @@ app.post('/location/clear/:id', (req, res) => {
     res.sendStatus(200);
 });
 
-// --- STALE WATCHER CLEANUP (AUTOMATISCH) ---
+// --- STALE WATCHER CLEANUP ---
 setInterval(() => {
     const now = Date.now();
     const STALE_TIMEOUT = 10 * 60 * 1000;
@@ -250,12 +284,10 @@ setInterval(() => {
             const watcherIds = Object.keys(dev.watchers);
             watcherIds.forEach(wId => {
                 if (now - dev.watchers[wId] > STALE_TIMEOUT) {
-                    console.log(`[CLEANUP] Entferne inaktiven Watcher ${wId} von ${deviceId}`);
                     delete dev.watchers[wId];
                     changed = true;
                 }
             });
-
             const newIsWatched = Object.keys(dev.watchers).length > 0;
             if (dev.isWatched !== newIsWatched) {
                 dev.isWatched = newIsWatched;
@@ -264,17 +296,13 @@ setInterval(() => {
             }
         }
     });
-
     if (changed) saveDevices();
 }, 60000);
 
-// --- SOCKET.IO ---
 io.on('connection', (socket) => {
-    console.log('Client verbunden:', socket.id);
     socket.emit('geofences_updated', geofences);
-    socket.on('disconnect', () => { console.log('Client getrennt'); });
 });
 
 server.listen(PORT, () => {
-    console.log(`🚀 Socket.io Server läuft auf Port ${PORT}`);
+    console.log(`🚀 Tracker-Server läuft auf Port ${PORT} (JSON, Batch & Binary Support)`);
 });
