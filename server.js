@@ -19,8 +19,22 @@ const io = new Server(server, { cors: { origin: "*" } });
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './devices.json';
 const GEOFENCE_FILE = './geofences.json';
+const AUDIO_DIR = './uploads/audio';
 
-// Standard Middlewares
+// --- AUDIO SETUP ---
+const storage = multer.diskStorage({
+    destination: async (req, file, cb) => { 
+        try { await fs.mkdir(AUDIO_DIR, { recursive: true }); } catch(e) {}
+        cb(null, AUDIO_DIR); 
+    },
+    filename: (req, file, cb) => {
+        const deviceId = req.body.deviceId || 'unknown';
+        cb(null, `audio_${deviceId}_${Date.now()}.mp3`);
+    }
+});
+const upload = multer({ storage: storage });
+
+// --- MIDDLEWARES ---
 app.use(bodyParser.json());
 app.use('/location/binary', bodyParser.raw({ type: 'application/octet-stream', limit: '50kb' }));
 app.use(express.static('public'));
@@ -53,6 +67,7 @@ async function saveGeofences() {
 
 // --- API ENDPUNKTE ---
 
+// 1. GEOFENCES
 app.get('/geofences', (req, res) => res.json(geofences));
 
 app.post('/geofences', async (req, res) => {
@@ -65,7 +80,40 @@ app.post('/geofences', async (req, res) => {
     res.status(201).json(gf);
 });
 
-// --- BINARY LOCATION (FIXED-POINT OPTIMIERUNG) ---
+app.delete('/geofences/:id', async (req, res) => {
+    geofences = geofences.filter(g => g.id !== req.params.id);
+    await saveGeofences();
+    io.emit('geofences_updated', geofences);
+    res.sendStatus(200);
+});
+
+// 2. GERÄTE-LISTEN (JETZT WIEDER DA!)
+app.get('/devices', (req, res) => {
+    res.json(Object.values(devices));
+});
+
+app.get('/devices/:id', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    if (devices[id]) res.json(devices[id]);
+    else res.status(404).send('Not found');
+});
+
+// 3. LOCATION UPDATES (JSON & BINARY)
+app.post('/location/update', async (req, res) => {
+    const data = req.body;
+    if (!data.deviceId) return res.status(400).send("Missing deviceId");
+    const id = data.deviceId.toLowerCase();
+
+    if (!devices[id]) devices[id] = { watchers: {} };
+    const isWatched = devices[id].watchers ? Object.keys(devices[id].watchers).length > 0 : false;
+
+    devices[id] = { ...devices[id], ...data, deviceId: id, isWatched, status: 'online' };
+
+    await saveDevices();
+    io.to(id).emit('location_update', devices[id]); // An den Room senden
+    res.sendStatus(200);
+});
+
 app.post('/location/binary', async (req, res) => {
     const buffer = req.body;
     if (!Buffer.isBuffer(buffer) || buffer.length < 5) return res.sendStatus(400);
@@ -103,47 +151,74 @@ app.post('/location/binary', async (req, res) => {
         }
 
         await saveDevices();
-        if (lastDev) {
-            // 🔥 ROOM-OPTIMIERUNG: Sende nur an Leute, die dieses Gerät beobachten
-            io.to(deviceId).emit('location_update', lastDev);
-        }
+        if (lastDev) io.to(deviceId).emit('location_update', lastDev);
         res.sendStatus(200);
-    } catch (e) {
-        console.error("Binary Parse Error:", e);
-        res.sendStatus(500);
-    }
+    } catch (e) { res.sendStatus(500); }
 });
 
-// --- WATCH MANAGEMENT (MIT ROOMS) ---
+// 4. WATCH MANAGEMENT
 app.post('/devices/:id/watch', async (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
-
     if (!devices[id]) return res.status(404).send('Not found');
     if (!devices[id].watchers) devices[id].watchers = {};
-
     devices[id].watchers[watcherId] = Date.now();
     devices[id].isWatched = true;
-
     await saveDevices();
     io.to(id).emit('location_update', devices[id]);
     res.sendStatus(200);
 });
 
+app.post('/devices/:id/unwatch', async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const watcherId = req.query.watcherId || "unknown";
+    if (devices[id] && devices[id].watchers) {
+        delete devices[id].watchers[watcherId];
+        devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
+        await saveDevices();
+        io.to(id).emit('location_update', devices[id]);
+    }
+    res.sendStatus(200);
+});
+
+// 5. STEUERUNG (ALARM & AUDIO)
+app.post('/devices/:id/alarm', async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const active = req.query.active === 'true' || req.body.active === true;
+    if (devices[id]) {
+        devices[id].alarmActive = active;
+        await saveDevices();
+        io.to(id).emit('command', { deviceId: id, action: active ? 'START_ALARM' : 'STOP_ALARM' });
+        res.sendStatus(200);
+    } else res.status(404).send('Not found');
+});
+
+app.post('/devices/:id/audio-request', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    io.to(id).emit('command', { deviceId: id, action: 'START_RECORDING' });
+    res.json({ message: "Sent" });
+});
+
+app.post('/audio/upload', upload.single('audio'), (req, res) => {
+    const deviceId = req.body.deviceId || 'unknown';
+    if (!req.file) return res.status(400).send("No file");
+    io.to(deviceId).emit('new_audio', {
+        deviceId, filename: req.file.filename,
+        url: `/uploads/audio/${req.file.filename}`, timestamp: Date.now()
+    });
+    res.sendStatus(200);
+});
+
 // --- SOCKET.IO ROOM HANDLING ---
 io.on('connection', (socket) => {
-    // Wenn eine App ein Gerät beobachten will, tritt sie dem Raum bei
     socket.on('join_device', (deviceId) => {
-        const id = deviceId.toLowerCase();
-        socket.join(id);
-        console.log(`Socket ${socket.id} joined room ${id}`);
+        socket.join(deviceId.toLowerCase());
     });
-
     socket.on('leave_device', (deviceId) => {
         socket.leave(deviceId.toLowerCase());
     });
 });
 
 server.listen(PORT, () => {
-    console.log(`🚀 Ultra-Efficient Server auf Port ${PORT}`);
+    console.log(`🚀 Server online auf Port ${PORT} (Vollständig)`);
 });
