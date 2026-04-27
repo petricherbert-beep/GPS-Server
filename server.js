@@ -93,24 +93,22 @@ app.delete('/geofences/:id', (req, res) => {
     res.sendStatus(200);
 });
 
-// --- LOCATION UPDATE (FIX 3) ---
+// --- LOCATION UPDATE (EINZELN) ---
 app.post('/location/update', (req, res) => {
     const data = req.body;
     if (!data.deviceId) return res.status(400).send("Missing deviceId");
     const id = data.deviceId.toLowerCase();
 
-    // Sicherstellen, dass Objekt und Watchers existieren
     if (!devices[id]) devices[id] = { watchers: {} };
     if (!devices[id].watchers) devices[id].watchers = {};
 
-    // Server berechnet isWatched selbst basierend auf der Watcher-Liste
     const isWatched = Object.keys(devices[id].watchers).length > 0;
 
     devices[id] = {
         ...devices[id],
         ...data,
         deviceId: id,
-        isWatched: isWatched,   // 🔥 Server-Wahrheit überschreibt App-Flag
+        isWatched: isWatched,
         status: 'online',
         timestamp: data.timestamp || Date.now()
     };
@@ -120,7 +118,38 @@ app.post('/location/update', (req, res) => {
     res.sendStatus(200);
 });
 
-// --- WATCH MANAGEMENT (FIX 1 & 2) ---
+// --- BATCH LOCATION UPDATE (NEU: FIXXT 404 FEHLER) ---
+app.post('/location/update-batch', (req, res) => {
+    const batch = req.body;
+    if (!Array.isArray(batch) || batch.length === 0) return res.sendStatus(200);
+    
+    let lastId = "";
+    batch.forEach(data => {
+        const id = data.deviceId.toLowerCase();
+        lastId = id;
+        if (!devices[id]) devices[id] = { watchers: {} };
+        if (!devices[id].watchers) devices[id].watchers = {};
+        
+        const isWatched = Object.keys(devices[id].watchers).length > 0;
+        devices[id] = {
+            ...devices[id],
+            ...data,
+            deviceId: id,
+            isWatched: isWatched,
+            status: 'online',
+            timestamp: data.timestamp || Date.now()
+        };
+    });
+    
+    saveDevices();
+    if (lastId && devices[lastId]) {
+        io.emit('location_update', devices[lastId]);
+    }
+    console.log(`[BATCH] ${batch.length} Punkte von ${lastId} empfangen`);
+    res.sendStatus(200);
+});
+
+// --- WATCH MANAGEMENT ---
 app.post('/devices/:id/watch', (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
@@ -129,8 +158,6 @@ app.post('/devices/:id/watch', (req, res) => {
     if (!devices[id].watchers) devices[id].watchers = {};
 
     devices[id].watchers[watcherId] = Date.now();
-    
-    // isWatched ist nur true, wenn die Liste nicht leer ist
     devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
 
     saveDevices();
@@ -147,8 +174,6 @@ app.post('/devices/:id/unwatch', (req, res) => {
     if (!devices[id].watchers) devices[id].watchers = {};
 
     delete devices[id].watchers[watcherId];
-
-    // Konsistente Neuberechnung
     devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
 
     saveDevices();
@@ -157,7 +182,7 @@ app.post('/devices/:id/unwatch', (req, res) => {
     res.sendStatus(200);
 });
 
-// --- SONSTIGE GERÄTE-STEUERUNG ---
+// --- GERÄTE-STEUERUNG ---
 app.post('/devices/wakeup-all', (req, res) => {
     io.emit('command', { action: 'WAKEUP_ALL' });
     res.sendStatus(200);
@@ -216,7 +241,7 @@ app.post('/location/clear/:id', (req, res) => {
 // --- STALE WATCHER CLEANUP (AUTOMATISCH) ---
 setInterval(() => {
     const now = Date.now();
-    const STALE_TIMEOUT = 10 * 60 * 1000; // 10 Minuten Inaktivität
+    const STALE_TIMEOUT = 10 * 60 * 1000;
     let changed = false;
 
     Object.keys(devices).forEach(deviceId => {
@@ -241,7 +266,7 @@ setInterval(() => {
     });
 
     if (changed) saveDevices();
-}, 60000); // Prüfung jede Minute
+}, 60000);
 
 // --- SOCKET.IO ---
 io.on('connection', (socket) => {
