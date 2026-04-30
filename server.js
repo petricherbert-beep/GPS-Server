@@ -6,18 +6,19 @@ import bodyParser from 'body-parser';
 import fs from 'fs/promises';
 import admin from 'firebase-admin';
 
-// --- FIREBASE INITIALISIERUNG (Lädt aus der JSON Datei) ---
+// --- FIREBASE INITIALISIERUNG ---
 async function initFirebase() {
     try {
+        // Nutzt die vorhandene JSON-Datei in deinem Repository
         const keyPath = './gps-tracking-app-c4f56-firebase-adminsdk-fbsvc-9290f27516.json';
         const serviceAccount = JSON.parse(await fs.readFile(keyPath, 'utf8'));
         
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount)
         });
-        console.log("✅ Firebase Admin erfolgreich aus Datei initialisiert");
+        console.log("✅ Firebase Admin erfolgreich initialisiert");
     } catch (e) {
-        console.error("⚠️ Firebase konnte nicht initialisiert werden:", e.message);
+        console.error("⚠️ Firebase Fehler:", e.message);
     }
 }
 initFirebase();
@@ -47,6 +48,7 @@ init();
 async function saveDevices() { try { await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2)); } catch (e) {} }
 async function saveGeofences() { try { await fs.writeFile(GEOFENCE_FILE, JSON.stringify(geofences, null, 2)); } catch (e) {} }
 
+// --- GEOFENCES ---
 app.get('/geofences', (req, res) => res.json(geofences));
 
 app.post('/geofences', async (req, res) => {
@@ -59,17 +61,50 @@ app.post('/geofences', async (req, res) => {
     res.status(201).json(gf);
 });
 
-app.get('/devices', (req, res) => res.json(Object.values(devices)));
-
+// --- LOKATION & IDENTITÄT (JSON) ---
 app.post('/location', async (req, res) => {
     const data = req.body;
     const id = data.deviceId.toLowerCase();
+    const event = data.geofenceEvent;
+    
+    // Update Gerätedaten
     devices[id] = { ...devices[id], ...data, deviceId: id, lastSeen: Date.now() };
     await saveDevices();
+
+    // 🔥 GEOFENCE PUSH BENACHRICHTIGUNG
+    if (event && event !== "heartbeat" && event !== "token_refresh" && event !== "wifi_lock") {
+        console.log(`🔔 Geofence Event von ${devices[id].name || id}: ${event}`);
+        
+        const isEnter = event.startsWith('enter:');
+        const action = isEnter ? 'betreten' : 'verlassen';
+        const zoneName = event.split(':')[1] || 'einer Zone';
+        const deviceName = devices[id].name || 'Ein Gerät';
+
+        // Nachricht an ALLE ANDEREN senden
+        Object.values(devices).forEach(other => {
+            if (other.deviceId !== id && other.fcmToken) {
+                const message = {
+                    data: {
+                        type: 'geofence_event',
+                        title: `Zone: ${zoneName}`,
+                        message: `${deviceName} hat ${zoneName} ${action}.`,
+                        zoneName: zoneName,
+                        deviceName: deviceName,
+                        action: action
+                    },
+                    token: other.fcmToken,
+                    android: { priority: 'normal' }
+                };
+                admin.messaging().send(message).catch(e => console.log("Push failed for", other.name));
+            }
+        });
+    }
+
     io.to(id).emit('location_update', devices[id]);
     res.sendStatus(200);
 });
 
+// --- ULTRA-BINARY DECODER V3 ---
 app.post('/location/binary', async (req, res) => {
     const buffer = req.body;
     if (!Buffer.isBuffer(buffer) || buffer.length < 5) return res.sendStatus(400);
@@ -95,7 +130,7 @@ app.post('/location/binary', async (req, res) => {
                 flags = buffer.readUInt8(offset++);
             } else {
                 const checkFrame = buffer.readUInt16LE(offset);
-                if (checkFrame === 0) {
+                if (checkFrame === 0) { // Forced Base Frame
                     offset += 2;
                     ts = Number(buffer.readBigInt64LE(offset)); offset += 8;
                     lat = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
@@ -116,7 +151,7 @@ app.post('/location/binary', async (req, res) => {
             devices[deviceId] = {
                 ...devices[deviceId], deviceId, name: deviceName, lat, lon, timestamp: ts, accuracy, battery,
                 isLocked: (flags & 1) !== 0, isMotion: (flags & 2) !== 0, isWifi: (flags & 4) !== 0,
-                accident: (flags & 64) !== 0, alarmActive: (flags & 128) !== 0, status: 'online'
+                accident: (flags & 64) !== 0, alarmActive: (flags & 128) !== 0, status: 'online', lastSeen: Date.now()
             };
         }
         await saveDevices();
@@ -125,13 +160,16 @@ app.post('/location/binary', async (req, res) => {
     } catch (e) { res.sendStatus(500); }
 });
 
+// --- ALARM STEUERUNG ---
 app.post('/devices/:id/alarm', async (req, res) => {
     const id = req.params.id.toLowerCase();
     const active = req.query.active === 'true';
     if (devices[id]) {
         devices[id].alarmActive = active;
         await saveDevices();
+        
         io.to(id).emit('command', { deviceId: id, action: active ? 'START_ALARM' : 'STOP_ALARM' });
+
         if (devices[id].fcmToken) {
             const message = {
                 data: {
@@ -149,11 +187,16 @@ app.post('/devices/:id/alarm', async (req, res) => {
     } else res.status(404).send('Not found');
 });
 
+// --- GERÄTEÜBERSICHT ---
+app.get('/devices', (req, res) => res.json(Object.values(devices)));
+
+// --- WATCH LOGIK ---
 app.post('/devices/:id/watch', async (req, res) => {
     const id = req.params.id.toLowerCase();
+    const watcherId = req.query.watcherId || "unknown";
     if (!devices[id]) devices[id] = { watchers: {} };
     if (!devices[id].watchers) devices[id].watchers = {};
-    devices[id].watchers[req.query.watcherId || "unknown"] = Date.now();
+    devices[id].watchers[watcherId] = Date.now();
     devices[id].isWatched = true;
     await saveDevices();
     io.to(id).emit('location_update', devices[id]);
@@ -162,8 +205,9 @@ app.post('/devices/:id/watch', async (req, res) => {
 
 app.post('/devices/:id/unwatch', async (req, res) => {
     const id = req.params.id.toLowerCase();
+    const watcherId = req.query.watcherId || "unknown";
     if (devices[id] && devices[id].watchers) {
-        delete devices[id].watchers[req.query.watcherId || "unknown"];
+        delete devices[id].watchers[watcherId];
         devices[id].isWatched = Object.keys(devices[id].watchers).length > 0;
         await saveDevices();
         io.to(id).emit('location_update', devices[id]);
@@ -176,4 +220,4 @@ io.on('connection', (socket) => {
     socket.on('leave_device', (deviceId) => socket.leave(deviceId.toLowerCase()));
 });
 
-server.listen(PORT, () => console.log(`🚀 Server online und lädt Key aus Datei`));
+server.listen(PORT, () => console.log(`🚀 GPS Server online auf Port ${PORT}`));
