@@ -9,7 +9,6 @@ import admin from 'firebase-admin';
 // --- FIREBASE INITIALISIERUNG ---
 async function initFirebase() {
     try {
-        // Nutzt die vorhandene JSON-Datei in deinem Repository
         const keyPath = './gps-tracking-app-c4f56-firebase-adminsdk-fbsvc-9290f27516.json';
         const serviceAccount = JSON.parse(await fs.readFile(keyPath, 'utf8'));
         
@@ -67,11 +66,10 @@ app.post('/location', async (req, res) => {
     const id = data.deviceId.toLowerCase();
     const event = data.geofenceEvent;
     
-    // Update Gerätedaten
     devices[id] = { ...devices[id], ...data, deviceId: id, lastSeen: Date.now() };
     await saveDevices();
 
-    // 🔥 GEOFENCE PUSH BENACHRICHTIGUNG
+    // GEOFENCE PUSH BENACHRICHTIGUNG
     if (event && event !== "heartbeat" && event !== "token_refresh" && event !== "wifi_lock") {
         console.log(`🔔 Geofence Event von ${devices[id].name || id}: ${event}`);
         
@@ -80,7 +78,6 @@ app.post('/location', async (req, res) => {
         const zoneName = event.split(':')[1] || 'einer Zone';
         const deviceName = devices[id].name || 'Ein Gerät';
 
-        // Nachricht an ALLE ANDEREN senden
         Object.values(devices).forEach(other => {
             if (other.deviceId !== id && other.fcmToken) {
                 const message = {
@@ -95,7 +92,7 @@ app.post('/location', async (req, res) => {
                     token: other.fcmToken,
                     android: { priority: 'normal' }
                 };
-                admin.messaging().send(message).catch(e => console.log("Push failed for", other.name));
+                admin.messaging().send(message).catch(e => console.log("Push failed"));
             }
         });
     }
@@ -130,7 +127,7 @@ app.post('/location/binary', async (req, res) => {
                 flags = buffer.readUInt8(offset++);
             } else {
                 const checkFrame = buffer.readUInt16LE(offset);
-                if (checkFrame === 0) { // Forced Base Frame
+                if (checkFrame === 0) {
                     offset += 2;
                     ts = Number(buffer.readBigInt64LE(offset)); offset += 8;
                     lat = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
@@ -167,7 +164,6 @@ app.post('/devices/:id/alarm', async (req, res) => {
     if (devices[id]) {
         devices[id].alarmActive = active;
         await saveDevices();
-        
         io.to(id).emit('command', { deviceId: id, action: active ? 'START_ALARM' : 'STOP_ALARM' });
 
         if (devices[id].fcmToken) {
@@ -181,24 +177,38 @@ app.post('/devices/:id/alarm', async (req, res) => {
                 token: devices[id].fcmToken,
                 android: { priority: 'high', ttl: 0 }
             };
-            admin.messaging().send(message).catch(e => console.log('Push Error:', e));
+            admin.messaging().send(message).catch(e => console.log('Push Error'));
         }
         res.sendStatus(200);
     } else res.status(404).send('Not found');
 });
 
-// --- GERÄTEÜBERSICHT ---
-app.get('/devices', (req, res) => res.json(Object.values(devices)));
-
-// --- WATCH LOGIK ---
+// --- WATCH LOGIK (MIT WAKEUP-PUSH) ---
 app.post('/devices/:id/watch', async (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
+    
     if (!devices[id]) devices[id] = { watchers: {} };
     if (!devices[id].watchers) devices[id].watchers = {};
+    
     devices[id].watchers[watcherId] = Date.now();
     devices[id].isWatched = true;
     await saveDevices();
+
+    // 🔥 SOFORTIGES AUFWECKEN PER PUSH (Live-on-Demand)
+    if (devices[id].fcmToken) {
+        console.log(`📡 Sende Wakeup-Push an ${devices[id].name || id}`);
+        const message = {
+            data: {
+                type: 'wakeup',
+                deviceId: id
+            },
+            token: devices[id].fcmToken,
+            android: { priority: 'high', ttl: 0 }
+        };
+        admin.messaging().send(message).catch(e => console.log("Wakeup failed"));
+    }
+
     io.to(id).emit('location_update', devices[id]);
     res.sendStatus(200);
 });
@@ -215,9 +225,11 @@ app.post('/devices/:id/unwatch', async (req, res) => {
     res.sendStatus(200);
 });
 
+app.get('/devices', (req, res) => res.json(Object.values(devices)));
+
 io.on('connection', (socket) => {
     socket.on('join_device', (deviceId) => socket.join(deviceId.toLowerCase()));
     socket.on('leave_device', (deviceId) => socket.leave(deviceId.toLowerCase()));
 });
 
-server.listen(PORT, () => console.log(`🚀 GPS Server online auf Port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 GPS Server mit Wakeup-Push online auf Port ${PORT}`));
