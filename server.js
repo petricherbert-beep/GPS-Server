@@ -8,16 +8,17 @@ import admin from 'firebase-admin';
 
 // --- FIREBASE INITIALISIERUNG ---
 async function initFirebase() {
+    const keyPath = './gps-tracking-app-c4f56-firebase-adminsdk-fbsvc-9290f27516.json';
     try {
-        const keyPath = './gps-tracking-app-c4f56-firebase-adminsdk-fbsvc-9290f27516.json';
         const serviceAccount = JSON.parse(await fs.readFile(keyPath, 'utf8'));
-        
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount)
         });
         console.log("✅ Firebase Admin erfolgreich initialisiert");
     } catch (e) {
-        console.error("⚠️ Firebase Fehler:", e.message);
+        console.error("❌ Firebase Fehler: Datei nicht gefunden oder ungültig!");
+        console.error("Gesuchter Pfad:", keyPath);
+        console.error("Fehlermeldung:", e.message);
     }
 }
 initFirebase();
@@ -47,19 +48,6 @@ init();
 async function saveDevices() { try { await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2)); } catch (e) {} }
 async function saveGeofences() { try { await fs.writeFile(GEOFENCE_FILE, JSON.stringify(geofences, null, 2)); } catch (e) {} }
 
-// --- GEOFENCES ---
-app.get('/geofences', (req, res) => res.json(geofences));
-
-app.post('/geofences', async (req, res) => {
-    const gf = req.body;
-    if (!gf.id) gf.id = Date.now().toString();
-    const index = geofences.findIndex(g => g.id === gf.id);
-    if (index !== -1) geofences[index] = gf; else geofences.push(gf);
-    await saveGeofences();
-    io.emit('geofences_updated', geofences);
-    res.status(201).json(gf);
-});
-
 // --- LOKATION & IDENTITÄT (JSON) ---
 app.post('/location', async (req, res) => {
     const data = req.body;
@@ -73,13 +61,13 @@ app.post('/location', async (req, res) => {
     await saveDevices();
 
     // GEOFENCE PUSH BENACHRICHTIGUNG
-    if (event && !["heartbeat", "token_refresh", "wifi_lock"].includes(event)) {
-        console.log(`🔔 Geofence Event von ${devices[id].name || id}: ${event}`);
+    if (event && !["heartbeat", "token_refresh", "wifi_lock", "forced_wakeup"].includes(event)) {
+        console.log(`🔔 Event von ${devices[id].name || id}: ${event}`);
         
         const isEnter = event.startsWith('enter:');
-        const action = isEnter ? 'betreten' : 'verlassen';
         const zoneName = event.split(':')[1] || 'einer Zone';
         const deviceName = devices[id].name || 'Ein Gerät';
+        const action = isEnter ? 'betreten' : 'verlassen';
 
         Object.values(devices).forEach(other => {
             if (other.deviceId !== id && other.fcmToken) {
@@ -93,9 +81,11 @@ app.post('/location', async (req, res) => {
                         action: action
                     },
                     token: other.fcmToken,
-                    android: { priority: 'normal' }
+                    android: { priority: 'high', ttl: 3600000 }
                 };
-                admin.messaging().send(message).catch(e => console.log("Push failed"));
+                admin.messaging().send(message)
+                    .then(() => console.log(`🚀 Geofence-Push an ${other.name || other.deviceId} erfolgreich`))
+                    .catch(e => console.log(`❌ Geofence-Push fehlgeschlagen für ${other.name}:`, e.message));
             }
         });
     }
@@ -111,12 +101,8 @@ app.post('/location/binary', async (req, res) => {
     
     try {
         let offset = 0;
-
         const version = buffer.readUInt8(offset++);
-        if (version !== 1) {
-            console.error(`❌ Falsche Protokoll-Version: ${version}`);
-            return res.sendStatus(400);
-        }
+        if (version !== 1) return res.sendStatus(400);
 
         const idLen = buffer.readUInt8(offset++);
         const deviceId = buffer.toString('utf8', offset, offset + idLen).toLowerCase();
@@ -127,67 +113,47 @@ app.post('/location/binary', async (req, res) => {
         offset += nameLen;
 
         const count = buffer.readUInt8(offset++);
-        
         let lastLat = 0, lastLon = 0, lastTs = 0;
 
         for (let i = 0; i < count; i++) {
             let lat, lon, ts, accuracy, battery, speed, flags;
-
             const isBaseFrame = buffer.readUInt8(offset++) === 1;
 
             if (isBaseFrame) {
-                // BASE FRAME (21 Bytes)
                 ts = Number(buffer.readBigInt64LE(offset)); offset += 8;
                 lat = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
                 lon = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
                 accuracy = buffer.readInt16LE(offset) / 10.0; offset += 2;
                 battery = buffer.readInt8(offset++);
-                speed = buffer.readInt8(offset++); // 🔥 NEU
+                speed = buffer.readInt8(offset++);
                 flags = buffer.readUInt8(offset++);
             } else {
-                // DELTA FRAME (8 Bytes)
                 const dt = buffer.readUInt16LE(offset); offset += 2;
                 const dLat = buffer.readInt16LE(offset) / 100000.0; offset += 2;
                 const dLon = buffer.readInt16LE(offset) / 100000.0; offset += 2;
-                speed = buffer.readInt8(offset++); // 🔥 NEU
+                speed = buffer.readInt8(offset++);
                 flags = buffer.readUInt8(offset++);
-
-                ts = lastTs + dt;
-                lat = lastLat + dLat;
-                lon = lastLon + dLon;
+                ts = lastTs + dt; lat = lastLat + dLat; lon = lastLon + dLon;
                 battery = devices[deviceId]?.battery || 0;
                 accuracy = devices[deviceId]?.accuracy || 10.0;
             }
-
             lastLat = lat; lastLon = lon; lastTs = ts;
 
             const incomingAccident = (flags & 64) !== 0;
             const incomingAlarm = (flags & 128) !== 0;
-
-            // 🔥 ALARM-SCHUTZ: Bestehenden Status beibehalten, falls das Paket keine neuen Alarme meldet
             const finalAccident = incomingAccident || (devices[deviceId]?.accident && !incomingAccident ? devices[deviceId].accident : incomingAccident);
             const finalAlarm = incomingAlarm || (devices[deviceId]?.alarmActive && !incomingAlarm ? devices[deviceId].alarmActive : incomingAlarm);
 
             devices[deviceId] = {
-                ...devices[deviceId], 
-                deviceId, name: deviceName, lat, lon, timestamp: ts, accuracy, battery, speed,
-                isLocked: (flags & 1) !== 0, 
-                isMotion: (flags & 2) !== 0, 
-                isWifi: (flags & 4) !== 0,
-                accident: finalAccident, 
-                alarmActive: finalAlarm, 
-                status: 'online', lastSeen: Date.now()
+                ...devices[deviceId], deviceId, name: deviceName, lat, lon, timestamp: ts, accuracy, battery, speed,
+                isLocked: (flags & 1) !== 0, isMotion: (flags & 2) !== 0, isWifi: (flags & 4) !== 0,
+                accident: finalAccident, alarmActive: finalAlarm, status: 'online', lastSeen: Date.now()
             };
         }
-
         await saveDevices();
         io.to(deviceId).emit('location_update', devices[deviceId]);
         res.sendStatus(200);
-
-    } catch (e) {
-        console.error("❌ Binary Decoding Error:", e);
-        res.sendStatus(500);
-    }
+    } catch (e) { res.sendStatus(500); }
 });
 
 // --- ALARM STEUERUNG ---
@@ -210,34 +176,33 @@ app.post('/devices/:id/alarm', async (req, res) => {
                 token: devices[id].fcmToken,
                 android: { priority: 'high', ttl: 0 }
             };
-            admin.messaging().send(message).catch(e => console.log('Push Error'));
+            admin.messaging().send(message)
+                .then(() => console.log(`🚀 Alarm-Push an ${devices[id].name} gesendet`))
+                .catch(e => console.log(`❌ Alarm-Push fehlgeschlagen:`, e.message));
         }
         res.sendStatus(200);
     } else res.status(404).send('Not found');
 });
 
-// --- WATCH LOGIK ---
+// --- WATCH LOGIK (MIT WAKEUP-PUSH) ---
 app.post('/devices/:id/watch', async (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
-    const watcherName = req.query.watcherName || "Unbekannt";
-    
     if (!devices[id]) devices[id] = { deviceId: id, watchers: {} };
     if (!devices[id].watchers) devices[id].watchers = {};
     
     devices[id].watchers[watcherId] = Date.now();
     devices[id].isWatched = true;
-    devices[id].watcherName = watcherName;
     await saveDevices();
 
     if (devices[id].fcmToken) {
         console.log(`📡 Sende Wakeup-Push an ${devices[id].name || id}`);
-        const message = {
+        admin.messaging().send({
             data: { type: 'wakeup', deviceId: id },
             token: devices[id].fcmToken,
             android: { priority: 'high', ttl: 0 }
-        };
-        admin.messaging().send(message).catch(e => console.log("Wakeup failed"));
+        }).then(() => console.log("🚀 Wakeup-Push erfolgreich gesendet"))
+          .catch(e => console.log("❌ Wakeup-Push fehlgeschlagen:", e.message));
     }
 
     io.to(id).emit('location_update', devices[id]);
@@ -256,11 +221,12 @@ app.post('/devices/:id/unwatch', async (req, res) => {
     res.sendStatus(200);
 });
 
+app.get('/geofences', (req, res) => res.json(geofences));
 app.get('/devices', (req, res) => res.json(Object.values(devices)));
 
 io.on('connection', (socket) => {
-    socket.on('join_device', (deviceId) => socket.join(deviceId.toLowerCase()));
-    socket.on('leave_device', (deviceId) => socket.leave(deviceId.toLowerCase()));
+    socket.on('join_device', (id) => socket.join(id.toLowerCase()));
+    socket.on('leave_device', (id) => socket.leave(id.toLowerCase()));
 });
 
-server.listen(PORT, () => console.log(`🚀 GPS Server V4 mit Speed-Fix online auf Port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 GPS Server V4 online auf Port ${PORT}`));
