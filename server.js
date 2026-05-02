@@ -63,14 +63,17 @@ app.post('/geofences', async (req, res) => {
 // --- LOKATION & IDENTITÄT (JSON) ---
 app.post('/location', async (req, res) => {
     const data = req.body;
+    if (!data.deviceId) return res.sendStatus(400);
+    
     const id = data.deviceId.toLowerCase();
     const event = data.geofenceEvent;
     
+    // Daten zusammenführen
     devices[id] = { ...devices[id], ...data, deviceId: id, lastSeen: Date.now() };
     await saveDevices();
 
     // GEOFENCE PUSH BENACHRICHTIGUNG
-    if (event && event !== "heartbeat" && event !== "token_refresh" && event !== "wifi_lock") {
+    if (event && !["heartbeat", "token_refresh", "wifi_lock"].includes(event)) {
         console.log(`🔔 Geofence Event von ${devices[id].name || id}: ${event}`);
         
         const isEnter = event.startsWith('enter:');
@@ -101,60 +104,93 @@ app.post('/location', async (req, res) => {
     res.sendStatus(200);
 });
 
-// --- ULTRA-BINARY DECODER V3 ---
+// --- ULTRA-BINARY DECODER V4 (Stabiles Typ-Flag Protokoll) ---
 app.post('/location/binary', async (req, res) => {
     const buffer = req.body;
-    if (!Buffer.isBuffer(buffer) || buffer.length < 5) return res.sendStatus(400);
+    if (!Buffer.isBuffer(buffer) || buffer.length < 6) return res.sendStatus(400);
+    
     try {
         let offset = 0;
+
+        // 1. Protokoll Version prüfen
+        const version = buffer.readUInt8(offset++);
+        if (version !== 1) {
+            console.error(`❌ Falsche Protokoll-Version: ${version}`);
+            return res.sendStatus(400);
+        }
+
+        // 2. ID & Name lesen
         const idLen = buffer.readUInt8(offset++);
         const deviceId = buffer.toString('utf8', offset, offset + idLen).toLowerCase();
         offset += idLen;
+
         const nameLen = buffer.readUInt8(offset++);
         const deviceName = buffer.toString('utf8', offset, offset + nameLen);
         offset += nameLen;
+
         const count = buffer.readUInt8(offset++);
         
         let lastLat = 0, lastLon = 0, lastTs = 0;
+
         for (let i = 0; i < count; i++) {
             let lat, lon, ts, accuracy, battery, flags;
-            if (i === 0) {
+
+            // 🔥 NEU: Flag lesen (1 = BASE, 0 = DELTA)
+            const isBaseFrame = buffer.readUInt8(offset++) === 1;
+
+            if (isBaseFrame) {
+                // BASE FRAME (20 Bytes)
                 ts = Number(buffer.readBigInt64LE(offset)); offset += 8;
                 lat = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
                 lon = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
-                accuracy = buffer.readUInt16LE(offset) / 10.0; offset += 2;
-                battery = buffer.readUInt8(offset++);
+                accuracy = buffer.readInt16LE(offset) / 10.0; offset += 2;
+                battery = buffer.readInt8(offset++);
                 flags = buffer.readUInt8(offset++);
             } else {
-                const checkFrame = buffer.readUInt16LE(offset);
-                if (checkFrame === 0) {
-                    offset += 2;
-                    ts = Number(buffer.readBigInt64LE(offset)); offset += 8;
-                    lat = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
-                    lon = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
-                    accuracy = buffer.readUInt16LE(offset) / 10.0; offset += 2;
-                    battery = buffer.readUInt8(offset++);
-                    flags = buffer.readUInt8(offset++);
-                } else {
-                    const dt = checkFrame; offset += 2;
-                    const dLat = buffer.readInt16LE(offset); offset += 2;
-                    const dLon = buffer.readInt16LE(offset); offset += 2;
-                    flags = buffer.readUInt8(offset++);
-                    ts = lastTs + dt; lat = lastLat + (dLat / 100000.0); lon = lastLon + (dLon / 100000.0);
-                    battery = devices[deviceId]?.battery || 0; accuracy = devices[deviceId]?.accuracy || 10.0;
-                }
+                // DELTA FRAME (7 Bytes)
+                const dt = buffer.readUInt16LE(offset); offset += 2;
+                const dLat = buffer.readInt16LE(offset) / 100000.0; offset += 2;
+                const dLon = buffer.readInt16LE(offset) / 100000.0; offset += 2;
+                flags = buffer.readUInt8(offset++);
+
+                ts = lastTs + dt;
+                lat = lastLat + dLat;
+                lon = lastLon + dLon;
+                // Metadaten vom letzten bekannten Stand nehmen
+                battery = devices[deviceId]?.battery || 0;
+                accuracy = devices[deviceId]?.accuracy || 10.0;
             }
+
+            // Werte für das nächste Delta merken
             lastLat = lat; lastLon = lon; lastTs = ts;
+
+            // Speicher-Update
             devices[deviceId] = {
-                ...devices[deviceId], deviceId, name: deviceName, lat, lon, timestamp: ts, accuracy, battery,
-                isLocked: (flags & 1) !== 0, isMotion: (flags & 2) !== 0, isWifi: (flags & 4) !== 0,
-                accident: (flags & 64) !== 0, alarmActive: (flags & 128) !== 0, status: 'online', lastSeen: Date.now()
+                ...devices[deviceId], 
+                deviceId, 
+                name: deviceName, 
+                lat, lon, 
+                timestamp: ts, 
+                accuracy, 
+                battery,
+                isLocked: (flags & 1) !== 0, 
+                isMotion: (flags & 2) !== 0, 
+                isWifi: (flags & 4) !== 0,
+                accident: (flags & 64) !== 0, 
+                alarmActive: (flags & 128) !== 0, 
+                status: 'online', 
+                lastSeen: Date.now()
             };
         }
+
         await saveDevices();
         io.to(deviceId).emit('location_update', devices[deviceId]);
         res.sendStatus(200);
-    } catch (e) { res.sendStatus(500); }
+
+    } catch (e) {
+        console.error("❌ Binary Decoding Error:", e);
+        res.sendStatus(500);
+    }
 });
 
 // --- ALARM STEUERUNG ---
@@ -183,26 +219,22 @@ app.post('/devices/:id/alarm', async (req, res) => {
     } else res.status(404).send('Not found');
 });
 
-// --- WATCH LOGIK (MIT WAKEUP-PUSH) ---
+// --- WATCH LOGIK ---
 app.post('/devices/:id/watch', async (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
     
-    if (!devices[id]) devices[id] = { watchers: {} };
+    if (!devices[id]) devices[id] = { deviceId: id, watchers: {} };
     if (!devices[id].watchers) devices[id].watchers = {};
     
     devices[id].watchers[watcherId] = Date.now();
     devices[id].isWatched = true;
     await saveDevices();
 
-    // 🔥 SOFORTIGES AUFWECKEN PER PUSH (Live-on-Demand)
     if (devices[id].fcmToken) {
         console.log(`📡 Sende Wakeup-Push an ${devices[id].name || id}`);
         const message = {
-            data: {
-                type: 'wakeup',
-                deviceId: id
-            },
+            data: { type: 'wakeup', deviceId: id },
             token: devices[id].fcmToken,
             android: { priority: 'high', ttl: 0 }
         };
@@ -232,4 +264,4 @@ io.on('connection', (socket) => {
     socket.on('leave_device', (deviceId) => socket.leave(deviceId.toLowerCase()));
 });
 
-server.listen(PORT, () => console.log(`🚀 GPS Server mit Wakeup-Push online auf Port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 GPS Server V4 online auf Port ${PORT}`));
