@@ -104,7 +104,7 @@ app.post('/location', async (req, res) => {
     res.sendStatus(200);
 });
 
-// --- ULTRA-BINARY DECODER V4 (Stabiles Typ-Flag Protokoll) ---
+// --- ULTRA-BINARY DECODER V4 (Stabiles Typ-Flag Protokoll mit SPEED) ---
 app.post('/location/binary', async (req, res) => {
     const buffer = req.body;
     if (!Buffer.isBuffer(buffer) || buffer.length < 6) return res.sendStatus(400);
@@ -112,14 +112,12 @@ app.post('/location/binary', async (req, res) => {
     try {
         let offset = 0;
 
-        // 1. Protokoll Version prüfen
         const version = buffer.readUInt8(offset++);
         if (version !== 1) {
             console.error(`❌ Falsche Protokoll-Version: ${version}`);
             return res.sendStatus(400);
         }
 
-        // 2. ID & Name lesen
         const idLen = buffer.readUInt8(offset++);
         const deviceId = buffer.toString('utf8', offset, offset + idLen).toLowerCase();
         offset += idLen;
@@ -133,53 +131,52 @@ app.post('/location/binary', async (req, res) => {
         let lastLat = 0, lastLon = 0, lastTs = 0;
 
         for (let i = 0; i < count; i++) {
-            let lat, lon, ts, accuracy, battery, flags;
+            let lat, lon, ts, accuracy, battery, speed, flags;
 
-            // 🔥 NEU: Flag lesen (1 = BASE, 0 = DELTA)
             const isBaseFrame = buffer.readUInt8(offset++) === 1;
 
             if (isBaseFrame) {
-                // BASE FRAME (20 Bytes)
+                // BASE FRAME (21 Bytes)
                 ts = Number(buffer.readBigInt64LE(offset)); offset += 8;
                 lat = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
                 lon = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
                 accuracy = buffer.readInt16LE(offset) / 10.0; offset += 2;
                 battery = buffer.readInt8(offset++);
+                speed = buffer.readInt8(offset++); // 🔥 NEU
                 flags = buffer.readUInt8(offset++);
             } else {
-                // DELTA FRAME (7 Bytes)
+                // DELTA FRAME (8 Bytes)
                 const dt = buffer.readUInt16LE(offset); offset += 2;
                 const dLat = buffer.readInt16LE(offset) / 100000.0; offset += 2;
                 const dLon = buffer.readInt16LE(offset) / 100000.0; offset += 2;
+                speed = buffer.readInt8(offset++); // 🔥 NEU
                 flags = buffer.readUInt8(offset++);
 
                 ts = lastTs + dt;
                 lat = lastLat + dLat;
                 lon = lastLon + dLon;
-                // Metadaten vom letzten bekannten Stand nehmen
                 battery = devices[deviceId]?.battery || 0;
                 accuracy = devices[deviceId]?.accuracy || 10.0;
             }
 
-            // Werte für das nächste Delta merken
             lastLat = lat; lastLon = lon; lastTs = ts;
 
-            // Speicher-Update
+            const incomingAccident = (flags & 64) !== 0;
+            const incomingAlarm = (flags & 128) !== 0;
+
+            // 🔥 ALARM-SCHUTZ: Bestehenden Status beibehalten, falls das Paket keine neuen Alarme meldet
+            const finalAccident = incomingAccident || (devices[deviceId]?.accident && !incomingAccident ? devices[deviceId].accident : incomingAccident);
+            const finalAlarm = incomingAlarm || (devices[deviceId]?.alarmActive && !incomingAlarm ? devices[deviceId].alarmActive : incomingAlarm);
+
             devices[deviceId] = {
                 ...devices[deviceId], 
-                deviceId, 
-                name: deviceName, 
-                lat, lon, 
-                timestamp: ts, 
-                accuracy, 
-                battery,
+                deviceId, name: deviceName, lat, lon, timestamp: ts, accuracy, battery, speed,
                 isLocked: (flags & 1) !== 0, 
                 isMotion: (flags & 2) !== 0, 
                 isWifi: (flags & 4) !== 0,
-                accident: (flags & 64) !== 0, 
-                alarmActive: (flags & 128) !== 0, 
-                status: 'online', 
-                lastSeen: Date.now()
+                accident: finalAccident, 
+                alarmActive: finalAlarm, 
+                status: 'online', lastSeen: Date.now()
             };
         }
 
@@ -223,12 +220,14 @@ app.post('/devices/:id/alarm', async (req, res) => {
 app.post('/devices/:id/watch', async (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
+    const watcherName = req.query.watcherName || "Unbekannt";
     
     if (!devices[id]) devices[id] = { deviceId: id, watchers: {} };
     if (!devices[id].watchers) devices[id].watchers = {};
     
     devices[id].watchers[watcherId] = Date.now();
     devices[id].isWatched = true;
+    devices[id].watcherName = watcherName;
     await saveDevices();
 
     if (devices[id].fcmToken) {
@@ -264,4 +263,4 @@ io.on('connection', (socket) => {
     socket.on('leave_device', (deviceId) => socket.leave(deviceId.toLowerCase()));
 });
 
-server.listen(PORT, () => console.log(`🚀 GPS Server V4 online auf Port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 GPS Server V4 mit Speed-Fix online auf Port ${PORT}`));
