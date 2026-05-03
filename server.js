@@ -34,21 +34,28 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './devices.json';
+const GEOFENCE_FILE = './geofences.json';
 
 app.use(bodyParser.json());
 app.use('/location/binary', bodyParser.raw({ type: 'application/octet-stream', limit: '50kb' }));
 app.use(express.static('public'));
 
 let devices = {};
+let geofences = [];
 let lastPushTimes = {}; // Spam-Schutz Speicher
 
 async function init() {
     try { devices = JSON.parse(await fs.readFile(DATA_FILE, 'utf8')); } catch (e) { devices = {}; }
+    try { geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8')); } catch (e) { geofences = []; }
 }
 init();
 
-async function saveDevices() { 
-    try { await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2)); } catch (e) {} 
+async function saveDevices() {
+    try { await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2)); } catch (e) {}
+}
+
+async function saveGeofences() {
+    try { await fs.writeFile(GEOFENCE_FILE, JSON.stringify(geofences, null, 2)); } catch (e) {}
 }
 
 function calculateDistance(lat1, lon1, lat2, lon2) {
@@ -59,31 +66,52 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+// --- GEOFENCES ---
+app.get('/geofences', (req, res) => res.json(geofences));
+
+app.post('/geofences', async (req, res) => {
+    const gf = req.body;
+    if (!gf.id) gf.id = Date.now().toString();
+    const index = geofences.findIndex(g => g.id === gf.id);
+    if (index !== -1) geofences[index] = gf; else geofences.push(gf);
+    await saveGeofences();
+    io.emit('geofences_updated', geofences);
+    res.status(201).json(gf);
+});
+
+app.delete('/geofences/:id', async (req, res) => {
+    const id = req.params.id;
+    geofences = geofences.filter(g => g.id !== id);
+    await saveGeofences();
+    io.emit('geofences_updated', geofences);
+    res.sendStatus(200);
+});
+
 // --- LOKATION & IDENTITÄT (JSON) ---
 app.post('/location', async (req, res) => {
     const data = req.body;
     if (!data.deviceId) return res.sendStatus(400);
     const id = data.deviceId.toLowerCase();
     const event = data.geofenceEvent;
-    
+
     // Daten zusammenführen (Alarm- & Unfallschutz)
-    devices[id] = { 
-        ...devices[id], ...data, 
+    devices[id] = {
+        ...devices[id], ...data,
         accident: data.accident !== undefined ? data.accident : (devices[id]?.accident || false),
         alarmActive: data.alarmActive !== undefined ? data.alarmActive : (devices[id]?.alarmActive || false),
-        deviceId: id, lastSeen: Date.now() 
+        deviceId: id, lastSeen: Date.now()
     };
     await saveDevices();
 
     const now = Date.now();
 
     // 1. GEOFENCE PUSH (mit Spam-Schutz 2 Min)
-    if (event && !["heartbeat", "token_refresh", "wifi_lock", "forced_wakeup"].includes(event)) {
+    if (event && !["heartbeat", "token_refresh", "wifi_lock", "forced_wakeup", "audit_check"].includes(event)) {
         const pushKey = `${id}:${event}`;
         if (!lastPushTimes[pushKey] || (now - lastPushTimes[pushKey] > 2 * 60 * 1000)) {
             lastPushTimes[pushKey] = now;
             console.log(`🔔 Event von ${devices[id].name || id}: ${event}`);
-            
+
             const isEnter = event.startsWith('enter:');
             const zoneName = event.split(':')[1] || 'Zone';
             const deviceName = devices[id].name || 'Ein Gerät';
@@ -91,15 +119,16 @@ app.post('/location', async (req, res) => {
             Object.values(devices).forEach(other => {
                 if (other.deviceId !== id && other.fcmToken) {
                     admin.messaging().send({
-                        data: { 
-                            type: 'geofence_event', 
-                            zoneName: zoneName, 
-                            deviceName: deviceName, 
-                            action: isEnter ? 'betreten' : 'verlassen' 
+                        data: {
+                            type: 'geofence_event',
+                            zoneName: zoneName,
+                            deviceName: deviceName,
+                            action: isEnter ? 'betreten' : 'verlassen',
+                            message: `${deviceName} hat ${zoneName} ${isEnter ? 'betreten' : 'verlassen'}.`
                         },
                         token: other.fcmToken,
                         android: { priority: 'high' }
-                    }).catch(e => console.log("Geofence push failed"));
+                    }).catch(e => console.log("Geofence push failed", e.message));
                 }
             });
         }
@@ -114,15 +143,15 @@ app.post('/location', async (req, res) => {
             Object.values(devices).forEach(other => {
                 if (other.deviceId !== id && other.fcmToken) {
                     admin.messaging().send({
-                        data: { 
-                            type: 'accident_alert', 
+                        data: {
+                            type: 'accident_alert',
                             deviceName: devices[id].name || 'Jemand',
                             title: '🚨 UNFALL ALARM!',
                             message: `${devices[id].name || 'Ein Gerät'} hat einen schweren Unfall gemeldet!`
                         },
                         token: other.fcmToken,
                         android: { priority: 'high' }
-                    }).catch(e => console.log("Accident push failed"));
+                    }).catch(e => console.log("Accident push failed", e.message));
                 }
             });
         }
@@ -142,14 +171,14 @@ app.post('/location', async (req, res) => {
                         lastPushTimes[proxKey] = now;
                         if (devices[id].fcmToken) {
                             admin.messaging().send({
-                                data: { 
-                                    type: 'proximity_alert', 
-                                    name: other.name || 'Gerät', 
-                                    distance: Math.round(dist).toString() 
+                                data: {
+                                    type: 'proximity_alert',
+                                    name: other.name || 'Gerät',
+                                    distance: Math.round(dist).toString()
                                 },
                                 token: devices[id].fcmToken,
                                 android: { priority: 'high' }
-                            }).catch(e => console.log("Prox-Push failed"));
+                            }).catch(e => console.log("Prox-Push failed", e.message));
                         }
                     }
                 }
@@ -188,13 +217,13 @@ app.post('/location/binary', async (req, res) => {
                 lon = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
                 accuracy = buffer.readInt16LE(offset) / 10.0; offset += 2;
                 battery = buffer.readInt8(offset++);
-                speed = buffer.readInt8(offset++) / 10.0; // 🔥 NEU: Präzision durch 10.0
+                speed = buffer.readInt8(offset++) / 10.0;
                 flags = buffer.readUInt8(offset++);
             } else {
                 const dt = buffer.readUInt16LE(offset); offset += 2;
-                const dLat = buffer.readInt16LE(offset) / 100000.0; offset += 2;
-                const dLon = buffer.readInt16LE(offset) / 100000.0; offset += 2;
-                speed = buffer.readInt8(offset++) / 10.0; // 🔥 NEU: Präzision durch 10.0
+                const dLat = buffer.readInt32LE(offset) / 10000000.0; offset += 4; // 🔥 FIX: readInt32LE statt readInt16LE für 10 Mio Präzision
+                const dLon = buffer.readInt32LE(offset) / 10000000.0; offset += 4;
+                speed = buffer.readInt8(offset++) / 10.0;
                 flags = buffer.readUInt8(offset++);
                 ts = lastTs + dt; lat = lastLat + dLat; lon = lastLon + dLon;
                 battery = devices[deviceId]?.battery || 0; accuracy = devices[deviceId]?.accuracy || 10.0;
@@ -216,7 +245,7 @@ app.post('/location/binary', async (req, res) => {
         await saveDevices();
         io.to(deviceId).emit('location_update', devices[deviceId]);
         res.sendStatus(200);
-    } catch (e) { res.sendStatus(500); }
+    } catch (e) { console.error("Binary Error:", e); res.sendStatus(500); }
 });
 
 // --- ALARM STEUERUNG ---
@@ -232,7 +261,7 @@ app.post('/devices/:id/alarm', async (req, res) => {
                 data: { type: active ? 'alarm' : 'stop_alarm', deviceId: id },
                 token: devices[id].fcmToken,
                 android: { priority: 'high', ttl: 0 }
-            }).catch(e => console.log('❌ Alarm Push Error'));
+            }).catch(e => console.log('❌ Alarm Push Error', e.message));
         }
         res.sendStatus(200);
     } else res.status(404).send('Not found');
@@ -242,17 +271,22 @@ app.post('/devices/:id/alarm', async (req, res) => {
 app.post('/devices/:id/watch', async (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId || "unknown";
+    const watcherName = req.query.watcherName || "Unbekannt";
+
     if (!devices[id]) devices[id] = { deviceId: id, watchers: {} };
     if (!devices[id].watchers) devices[id].watchers = {};
+
     devices[id].watchers[watcherId] = Date.now();
     devices[id].isWatched = true;
+    devices[id].watcherName = watcherName; // 🔥 Speichern für UI Anzeige
+
     await saveDevices();
     if (devices[id].fcmToken) {
         admin.messaging().send({
             data: { type: 'wakeup', deviceId: id },
             token: devices[id].fcmToken,
             android: { priority: 'high', ttl: 0 }
-        }).catch(e => console.log("❌ Wakeup failed"));
+        }).catch(e => console.log("❌ Wakeup failed", e.message));
     }
     io.to(id).emit('location_update', devices[id]);
     res.sendStatus(200);
