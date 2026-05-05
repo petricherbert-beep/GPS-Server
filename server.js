@@ -47,10 +47,22 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- 🛡️ MIDDLEWARE: API-KEY AUTHENTIFIZIERUNG ---
+// --- 🛡️ MIDDLEWARE 2: API-KEY AUTHENTIFIZIERUNG ---
 app.use((req, res, next) => {
-    if (req.path.startsWith('/public')) return next();
-    if (req.headers['x-api-key'] !== API_KEY) {
+    // 1. Erlaube das Laden der Webseite (Statische Dateien)
+    if (req.path === '/' || req.path === '/index.html' || req.path.startsWith('/public')) {
+        return next();
+    }
+    
+    // 2. Erlaube den Binär-Endpunkt (Sicherheit wird im Handler geprüft)
+    if (req.path === '/location/binary') return next();
+
+    // 3. Alle anderen Daten-Endpunkte brauchen den Key im Header
+    const clientKey = req.headers['x-api-key'];
+    if (clientKey !== API_KEY) {
+        if (req.path !== '/devices') { // Logge nur kritische Pfade
+            console.warn(`⚠️ Unbefugter Daten-Zugriff von: ${req.ip} auf ${req.path}`);
+        }
         return res.sendStatus(401);
     }
     next();
