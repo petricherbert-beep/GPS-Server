@@ -164,10 +164,7 @@ async function handleEvents(id, data) {
 
 function broadcast(senderId, payload) {
     Object.values(devices).forEach(d => {
-        if (d.deviceId !== senderId && d.fcmToken) {
-            admin.messaging().send({ data: payload, token: d.fcmToken, android: { priority: 'high' } })
-                .catch(e => { if (e.code === 'messaging/registration-token-not-registered') d.fcmToken = null; });
-        }
+        if (d.deviceId !== senderId && d.fcmToken) admin.messaging().send({ data: payload, token: d.fcmToken, android: { priority: 'high' } }).catch(() => {});
     });
 }
 
@@ -177,10 +174,7 @@ function sendDoublePush(id1, id2, type, extra) {
     lastPushTimes[key] = Date.now();
     [id1, id2].forEach(tid => {
         const oid = tid === id1 ? id2 : id1;
-        if (devices[tid]?.fcmToken) {
-            admin.messaging().send({ data: { ...extra, type, name: devices[oid].name || 'Gerät' }, token: devices[tid].fcmToken })
-                .catch(e => { if (e.code === 'messaging/registration-token-not-registered') devices[tid].fcmToken = null; });
-        }
+        if (devices[tid]?.fcmToken) admin.messaging().send({ data: { ...extra, type, name: devices[oid].name || 'Gerät' }, token: devices[tid].fcmToken }).catch(() => {});
     });
 }
 
@@ -192,6 +186,7 @@ function updateDevice(id, data) {
         accident: (flags & 64) !== 0 || (devices[id]?.accident || false),
         alarmActive: (flags & 128) !== 0 || (devices[id]?.alarmActive || false)
     };
+    handleEvents(id, devices[id]);
 }
 
 // --- ENDPUNKTE ---
@@ -212,7 +207,6 @@ app.post('/location', async (req, res) => {
     if (!id) return res.sendStatus(400);
     updateDevice(id, req.body);
     saveDevicesSafe();
-    handleEvents(id, req.body);
     io.to(id).emit('location_update', devices[id]);
     res.sendStatus(200);
 });
@@ -269,7 +263,6 @@ app.post('/location/binary', async (req, res) => {
             lastLat = lat; lastLon = lon; lastTs = ts;
         }
         saveDevicesSafe();
-        handleEvents(deviceId, devices[deviceId]);
         io.to(deviceId).emit('location_update', devices[deviceId]);
         res.sendStatus(200);
     } catch (e) { console.error("Binary Crash prevented:", e.message); res.sendStatus(400); }
