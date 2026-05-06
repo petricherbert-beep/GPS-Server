@@ -51,12 +51,20 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
     if (req.path.startsWith('/public')) return next();
 
-    const providedKey = (req.headers['x-api-key'] || req.headers['X-API-KEY'] || "").trim();
+    // 🔥 NEU: Akzeptiert Header ODER Query-Parameter (?apiKey=...)
+    const providedKey = (
+        req.headers['x-api-key'] ||
+        req.headers['X-API-KEY'] ||
+        req.query.apiKey ||
+        ""
+    ).trim();
+
     const serverKey = API_KEY.trim();
 
     if (providedKey !== serverKey) {
         console.warn(`⚠️ AUTH-FEHLER [${req.ip}]: ${req.method} ${req.path}`);
         console.warn(`   Header erhalten:`, JSON.stringify(req.headers));
+        if (req.query.apiKey) console.warn(`   Query-Key erhalten: '${req.query.apiKey.substring(0,3)}...'`);
         return res.sendStatus(401);
     }
     next();
