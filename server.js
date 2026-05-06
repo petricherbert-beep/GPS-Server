@@ -206,6 +206,72 @@ function updateDevice(id, data) {
 // --- ENDPUNKTE ---
 app.get('/geofences', (req, res) => res.json(geofences));
 
+app.post('/devices/:id/alarm', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const active = req.query.active === 'true';
+    if (!devices[id]) return res.sendStatus(404);
+    devices[id].alarmActive = active;
+    saveDevicesSafe();
+    io.to(id).emit('location_update', devices[id]);
+
+    if (devices[id].fcmToken) {
+        admin.messaging().send({
+            data: { type: active ? 'START_ALARM' : 'STOP_ALARM', deviceId: id },
+            token: devices[id].fcmToken,
+            android: { priority: 'high' }
+        }).catch(e => console.error("Push Error:", e.message));
+    }
+    res.sendStatus(200);
+});
+
+app.post('/devices/wakeup-all', (req, res) => {
+    Object.values(devices).forEach(d => {
+        if (d.fcmToken) {
+            admin.messaging().send({
+                data: { type: 'WAKEUP' },
+                token: d.fcmToken,
+                android: { priority: 'high' }
+            }).catch(() => {});
+        }
+    });
+    res.sendStatus(200);
+});
+
+app.post('/devices/:id/watch', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const { watcherId, watcherName } = req.query;
+    if (!devices[id]) return res.sendStatus(404);
+
+    if (!devices[id].watchers) devices[id].watchers = {};
+    devices[id].watchers[watcherId] = Date.now();
+    devices[id].isWatched = true;
+    devices[id].watcherName = watcherName || watcherId;
+
+    saveDevicesSafe();
+    io.to(id).emit('location_update', devices[id]);
+
+    if (devices[id].fcmToken) {
+        admin.messaging().send({
+            data: { type: 'WAKEUP', watcherName: watcherName || watcherId },
+            token: devices[id].fcmToken,
+            android: { priority: 'high' }
+        }).catch(() => {});
+    }
+    res.sendStatus(200);
+});
+
+app.post('/devices/:id/unwatch', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const { watcherId } = req.query;
+    if (devices[id] && devices[id].watchers) {
+        delete devices[id].watchers[watcherId];
+        devices[id].isWatched = Object.keys(devices[id].watchers || {}).length > 0;
+        saveDevicesSafe();
+        io.to(id).emit('location_update', devices[id]);
+    }
+    res.sendStatus(200);
+});
+
 app.post('/geofences', async (req, res) => {
     const gf = req.body;
     if (!gf.id) gf.id = Date.now().toString();
