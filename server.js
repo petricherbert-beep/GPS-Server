@@ -50,10 +50,13 @@ app.use((req, res, next) => {
 // --- 🛡️ MIDDLEWARE: API-KEY AUTHENTIFIZIERUNG ---
 app.use((req, res, next) => {
     if (req.path.startsWith('/public')) return next();
-    const providedKey = req.headers['x-api-key'];
-    if (providedKey !== API_KEY) {
-        console.warn(`⚠️ Unbefugter Zugriff von: ${req.ip} auf ${req.path}`);
-        console.warn(`   Key-Check: Server erwartet '${API_KEY.substring(0,3)}...', erhalten: '${providedKey ? providedKey.substring(0,3) + '...' : 'nichts'}'`);
+
+    const providedKey = (req.headers['x-api-key'] || req.headers['X-API-KEY'] || "").trim();
+    const serverKey = API_KEY.trim();
+
+    if (providedKey !== serverKey) {
+        console.warn(`⚠️ AUTH-FEHLER [${req.ip}]: ${req.method} ${req.path}`);
+        console.warn(`   Header erhalten:`, JSON.stringify(req.headers));
         return res.sendStatus(401);
     }
     next();
