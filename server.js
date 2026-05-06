@@ -200,6 +200,8 @@ function updateDevice(id, data) {
     const flags = data.flags || 0;
     const old = devices[id] || {};
 
+    // 🔥 LOGIK-FIX: Wenn Daten explizit als 'false' kommen, übernehmen wir das.
+    // Wenn Daten gar nicht kommen (undefined), behalten wir den alten Status.
     devices[id] = {
         ...old,
         ...data,
@@ -208,8 +210,8 @@ function updateDevice(id, data) {
         isLocked: (flags & 1) !== 0 || (data.isLocked ?? old.isLocked ?? false),
         isMotion: (flags & 2) !== 0 || (data.isMotion ?? old.isMotion ?? false),
         isWifi: (flags & 4) !== 0 || (data.isWifi ?? old.isWifi ?? false),
-        accident: (flags & 64) !== 0 || (data.accident ?? old.accident ?? false),
-        alarmActive: (flags & 128) !== 0 || (data.alarmActive ?? old.alarmActive ?? false)
+        accident: (flags & 64) !== 0 || (data.accident !== undefined ? data.accident : old.accident) || false,
+        alarmActive: (flags & 128) !== 0 || (data.alarmActive !== undefined ? data.alarmActive : old.alarmActive) || false
     };
     handleEvents(id, devices[id]);
 }
@@ -221,19 +223,26 @@ app.post('/devices/:id/alarm', (req, res) => {
     const id = req.params.id.toLowerCase();
     const active = req.query.active === 'true';
     if (!devices[id]) return res.sendStatus(404);
+
+    console.log(`🔔 ALARM-REQUEST: ${active ? 'START' : 'STOP'} für Gerät ${id}`);
+
     devices[id].alarmActive = active;
+    if (!active) devices[id].accident = false; // 🔥 Wenn Alarm gestoppt wird, löschen wir auch den Unfall-Status
+
     saveDevicesSafe();
     io.to(id).emit('location_update', devices[id]);
 
     if (devices[id].fcmToken) {
+        console.log(`   -> Sende targeted Push an ${id}`);
         admin.messaging().send({
             data: {
-                type: active ? 'alarm' : 'stop_alarm', // 🔥 Kleinschreibung für Handy-App
-                title: active ? '🚨 NOTFALL ALARM!' : 'Alarm gestoppt'
+                type: active ? 'alarm' : 'stop_alarm',
+                title: active ? '🚨 NOTFALL ALARM!' : 'Alarm gestoppt',
+                message: active ? 'Jemand hat für dich einen Alarm ausgelöst!' : 'Der Alarm wurde beendet.'
             },
             token: devices[id].fcmToken,
             android: { priority: 'high' }
-        }).catch(e => console.error("Push Error:", e.message));
+        }).catch(e => console.error("   -> Push Error:", e.message));
     }
     res.sendStatus(200);
 });
@@ -296,6 +305,19 @@ app.post('/geofences', async (req, res) => {
     res.status(201).json(gf);
 });
 
+app.delete('/geofences/:id', async (req, res) => {
+    const id = req.params.id;
+    const initialLen = geofences.length;
+    geofences = geofences.filter(g => g.id !== id);
+    if (geofences.length !== initialLen) {
+        saveGeofencesSafe();
+        io.emit('geofences_updated', geofences);
+        res.sendStatus(200);
+    } else {
+        res.sendStatus(404);
+    }
+});
+
 app.post('/location', async (req, res) => {
     const id = req.body.deviceId?.toLowerCase();
     if (!id) return res.sendStatus(400);
@@ -303,6 +325,36 @@ app.post('/location', async (req, res) => {
     saveDevicesSafe();
     io.to(id).emit('location_update', devices[id]);
     res.sendStatus(200);
+});
+
+app.post('/location/update-batch', async (req, res) => {
+    const batch = req.body;
+    if (!Array.isArray(batch)) return res.sendStatus(400);
+
+    batch.forEach(item => {
+        const id = item.deviceId?.toLowerCase();
+        if (id) updateDevice(id, item);
+    });
+
+    saveDevicesSafe();
+    // Wir nehmen an, dass der Batch von einem Gerät kommt, oder wir emitten für alle
+    if (batch.length > 0 && batch[0].deviceId) {
+        const firstId = batch[0].deviceId.toLowerCase();
+        io.to(firstId).emit('location_update', devices[firstId]);
+    }
+    res.sendStatus(200);
+});
+
+app.post('/location/clear/:id', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    if (devices[id]) {
+        // Da wir keine History auf dem Server speichern (nur den letzten Punkt),
+        // setzen wir hier einfach die letzten Koordinaten zurück, falls gewünscht.
+        // Oder wir lassen es als No-Op für die Kompatibilität.
+        res.sendStatus(200);
+    } else {
+        res.sendStatus(404);
+    }
 });
 
 app.post('/location/binary', async (req, res) => {
@@ -360,4 +412,10 @@ app.post('/location/binary', async (req, res) => {
 });
 
 app.get('/devices', (req, res) => res.json(Object.values(devices)));
+
+app.get('/devices/:id', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    if (!devices[id]) return res.sendStatus(404);
+    res.json(devices[id]);
+});
 server.listen(PORT, () => console.log(`🚀 Final Production GPS Server online auf Port ${PORT}`));
