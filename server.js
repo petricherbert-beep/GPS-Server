@@ -52,7 +52,6 @@ app.use((req, res, next) => {
     // 🔥 Erlaube Root-Pfad (Health-Checks) und öffentliche Dateien ohne Key
     if (req.path === '/' || req.path.startsWith('/public')) return next();
 
-    // 🔥 NEU: Akzeptiert Header ODER Query-Parameter (?apiKey=...)
     const providedKey = (
         req.headers['x-api-key'] ||
         req.headers['X-API-KEY'] ||
@@ -65,6 +64,7 @@ app.use((req, res, next) => {
     if (providedKey !== serverKey) {
         const clientIp = req.headers['x-forwarded-for'] || req.ip;
         console.warn(`⚠️ AUTH-FEHLER [${clientIp}]: ${req.method} ${req.path}`);
+        console.warn(`   Header erhalten:`, JSON.stringify(req.headers)); // 🔥 LOGGT HEADER
         return res.sendStatus(401);
     }
     next();
@@ -219,7 +219,10 @@ app.post('/devices/:id/alarm', (req, res) => {
 
     if (devices[id].fcmToken) {
         admin.messaging().send({
-            data: { type: active ? 'START_ALARM' : 'STOP_ALARM', deviceId: id },
+            data: {
+                type: active ? 'alarm' : 'stop_alarm', // 🔥 Kleinschreibung für Handy-App
+                title: active ? '🚨 NOTFALL ALARM!' : 'Alarm gestoppt'
+            },
             token: devices[id].fcmToken,
             android: { priority: 'high' }
         }).catch(e => console.error("Push Error:", e.message));
