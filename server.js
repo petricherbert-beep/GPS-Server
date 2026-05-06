@@ -49,7 +49,8 @@ app.use((req, res, next) => {
 
 // --- 🛡️ MIDDLEWARE: API-KEY AUTHENTIFIZIERUNG ---
 app.use((req, res, next) => {
-    if (req.path.startsWith('/public')) return next();
+    // 🔥 Erlaube Root-Pfad (Health-Checks) und öffentliche Dateien ohne Key
+    if (req.path === '/' || req.path.startsWith('/public')) return next();
 
     // 🔥 NEU: Akzeptiert Header ODER Query-Parameter (?apiKey=...)
     const providedKey = (
@@ -62,13 +63,15 @@ app.use((req, res, next) => {
     const serverKey = API_KEY.trim();
 
     if (providedKey !== serverKey) {
-        console.warn(`⚠️ AUTH-FEHLER [${req.ip}]: ${req.method} ${req.path}`);
-        console.warn(`   Header erhalten:`, JSON.stringify(req.headers));
-        if (req.query.apiKey) console.warn(`   Query-Key erhalten: '${req.query.apiKey.substring(0,3)}...'`);
+        const clientIp = req.headers['x-forwarded-for'] || req.ip;
+        console.warn(`⚠️ AUTH-FEHLER [${clientIp}]: ${req.method} ${req.path}`);
         return res.sendStatus(401);
     }
     next();
 });
+
+// Root-Endpunkt für Health-Checks
+app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
 
 app.use(bodyParser.json());
 app.use('/location/binary', bodyParser.raw({ type: 'application/octet-stream', limit: '50kb' }));
