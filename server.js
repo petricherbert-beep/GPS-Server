@@ -306,14 +306,19 @@ app.post('/geofences', async (req, res) => {
 });
 
 app.delete('/geofences/:id', async (req, res) => {
-    const id = req.params.id;
+    const id = req.params.id.trim();
     const initialLen = geofences.length;
-    geofences = geofences.filter(g => g.id !== id);
+
+    // 🔥 ROBUSTER VERGLEICH: Vergleiche IDs als Strings und trimme sie
+    geofences = geofences.filter(g => String(g.id).trim() !== id);
+
     if (geofences.length !== initialLen) {
+        console.log(`✅ Geofence gelöscht: ${id}`);
         saveGeofencesSafe();
         io.emit('geofences_updated', geofences);
         res.sendStatus(200);
     } else {
+        console.warn(`⚠️ Geofence zum Löschen nicht gefunden: ${id}`);
         res.sendStatus(404);
     }
 });
