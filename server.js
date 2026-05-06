@@ -113,7 +113,8 @@ setInterval(() => {
 
     for (const id in devices) {
         const d = devices[id];
-        if (d.status !== 'offline' && (now - d.lastSeen > 65000)) {
+        // 🔥 13 Minuten (12 Min Intervall + 1 Min Puffer)
+        if (d.status !== 'offline' && (now - d.lastSeen > 780000)) {
             d.status = 'offline';
             io.to(id).emit('location_update', d);
             changed = true;
@@ -197,11 +198,18 @@ function sendDoublePush(id1, id2, type, extra) {
 
 function updateDevice(id, data) {
     const flags = data.flags || 0;
+    const old = devices[id] || {};
+
     devices[id] = {
-        ...devices[id], ...data, status: 'online', lastSeen: Date.now(),
-        isLocked: (flags & 1) !== 0, isMotion: (flags & 2) !== 0, isWifi: (flags & 4) !== 0,
-        accident: (flags & 64) !== 0 || (devices[id]?.accident || false),
-        alarmActive: (flags & 128) !== 0 || (devices[id]?.alarmActive || false)
+        ...old,
+        ...data,
+        status: 'online',
+        lastSeen: Date.now(),
+        isLocked: (flags & 1) !== 0 || (data.isLocked ?? old.isLocked ?? false),
+        isMotion: (flags & 2) !== 0 || (data.isMotion ?? old.isMotion ?? false),
+        isWifi: (flags & 4) !== 0 || (data.isWifi ?? old.isWifi ?? false),
+        accident: (flags & 64) !== 0 || (data.accident ?? old.accident ?? false),
+        alarmActive: (flags & 128) !== 0 || (data.alarmActive ?? old.alarmActive ?? false)
     };
     handleEvents(id, devices[id]);
 }
