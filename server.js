@@ -35,6 +35,34 @@ app.use(cors({ origin: "*" }));
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
+// --- 🌐 SOCKET.IO LOGIK (Räume für Live-Tracking) ---
+io.on('connection', (socket) => {
+    console.log(`🔌 Client verbunden: ${socket.id}`);
+
+    socket.on('join_device', (id) => {
+        if (!id) return;
+        const deviceId = id.toLowerCase().trim();
+        socket.join(deviceId);
+        console.log(`📡 Client ${socket.id} beobachtet jetzt: ${deviceId}`);
+
+        // Sofort aktuellen Status senden, falls bekannt
+        if (devices[deviceId]) {
+            socket.emit('location_update', devices[deviceId]);
+        }
+    });
+
+    socket.on('leave_device', (id) => {
+        if (!id) return;
+        const deviceId = id.toLowerCase().trim();
+        socket.leave(deviceId);
+        console.log(`🔌 Client ${socket.id} stoppt Beobachtung von: ${deviceId}`);
+    });
+
+    socket.on('disconnect', () => {
+        console.log(`🔌 Client getrennt: ${socket.id}`);
+    });
+});
+
 // --- 🛡️ MIDDLEWARE: RATE LIMITING (Memory-Safe) ---
 const rateMap = {};
 app.use((req, res, next) => {
@@ -49,8 +77,8 @@ app.use((req, res, next) => {
 
 // --- 🛡️ MIDDLEWARE: API-KEY AUTHENTIFIZIERUNG ---
 app.use((req, res, next) => {
-    // 🔥 Erlaube Root-Pfad (Health-Checks) und öffentliche Dateien ohne Key
-    if (req.path === '/' || req.path.startsWith('/public')) return next();
+    // 🔥 Erlaube Root-Pfad (Health-Checks), Socket.io Handshake und öffentliche Dateien ohne Key
+    if (req.path === '/' || req.path.startsWith('/socket.io') || req.path.startsWith('/public')) return next();
 
     const providedKey = (
         req.headers['x-api-key'] ||
@@ -149,8 +177,10 @@ async function handleEvents(id, data) {
     // Geofence
     if (data.geofenceEvent && !["heartbeat", "token_refresh", "audit_check"].includes(data.geofenceEvent)) {
         const key = `gf:${id}:${data.geofenceEvent}`;
-        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 120000)) {
+        // 🔥 Cooldown auf 10 Minuten erhöht, um "Flattern" an Zonengrenzen zu dämpfen
+        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 600000)) {
             lastPushTimes[key] = now;
+            console.log(`📢 GEOFENCE EVENT [${id}]: ${data.geofenceEvent}`);
             broadcast(id, {
                 type: 'geofence_event',
                 zoneName: data.geofenceEvent.split(':')[1] || 'Zone',
@@ -200,8 +230,10 @@ function updateDevice(id, data) {
     const flags = data.flags || 0;
     const old = devices[id] || {};
 
-    // 🔥 LOGIK-FIX: Wenn Daten explizit als 'false' kommen, übernehmen wir das.
-    // Wenn Daten gar nicht kommen (undefined), behalten wir den alten Status.
+    // 🔥 LOGIK: Wir identifizieren, ob im aktuellen Paket ein Event steckt
+    const incomingGeofenceEvent = data.geofenceEvent;
+    const isAccident = (flags & 64) !== 0 || data.accident === true;
+
     devices[id] = {
         ...old,
         ...data,
@@ -210,10 +242,21 @@ function updateDevice(id, data) {
         isLocked: (flags & 1) !== 0 || (data.isLocked ?? old.isLocked ?? false),
         isMotion: (flags & 2) !== 0 || (data.isMotion ?? old.isMotion ?? false),
         isWifi: (flags & 4) !== 0 || (data.isWifi ?? old.isWifi ?? false),
-        accident: (flags & 64) !== 0 || (data.accident !== undefined ? data.accident : old.accident) || false,
+        accident: isAccident || (data.accident !== undefined ? data.accident : old.accident) || false,
         alarmActive: (flags & 128) !== 0 || (data.alarmActive !== undefined ? data.alarmActive : old.alarmActive) || false
     };
-    handleEvents(id, devices[id]);
+
+    // 🔥 WICHTIG: Geofence-Events dürfen nicht im permanenten Status bleiben,
+    // sonst triggern sie bei JEDEM Standort-Update erneut (Duplicate Push).
+    delete devices[id].geofenceEvent;
+
+    // Wir übergeben an handleEvents das merged Objekt für Kontext (lat/lon),
+    // aber erzwingen die Event-Felder auf den Stand von GENAU DIESEM Paket.
+    handleEvents(id, {
+        ...devices[id],
+        geofenceEvent: incomingGeofenceEvent,
+        accident: isAccident
+    });
 }
 
 // --- ENDPUNKTE ---
@@ -230,7 +273,15 @@ app.post('/devices/:id/alarm', (req, res) => {
     if (!active) devices[id].accident = false; // 🔥 Wenn Alarm gestoppt wird, löschen wir auch den Unfall-Status
 
     saveDevicesSafe();
+
+    // 🔥 Echtzeit-Update an alle Beobachter in diesem Raum
     io.to(id).emit('location_update', devices[id]);
+
+    // 🔥 COMMAND an das Gerät selbst senden (falls per WebSocket verbunden)
+    io.to(id).emit('command', {
+        deviceId: id,
+        action: active ? 'START_ALARM' : 'STOP_ALARM'
+    });
 
     if (devices[id].fcmToken) {
         console.log(`   -> Sende targeted Push an ${id}`);
