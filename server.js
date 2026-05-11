@@ -157,7 +157,13 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
 
 app.use(bodyParser.json());
-app.use(bodyParser.raw({ type: 'application/x-protobuf', limit: '100kb' }));
+app.use(bodyParser.raw({
+    type: (req) => {
+        const ct = req.headers['content-type'] || '';
+        return ct.includes('protobuf') || ct.includes('octet-stream');
+    },
+    limit: '200kb'
+}));
 
 let devices = {};
 let geofences = [];
