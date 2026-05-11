@@ -5,6 +5,7 @@ import { Server } from 'socket.io';
 import bodyParser from 'body-parser';
 import fs from 'fs/promises';
 import admin from 'firebase-admin';
+import protobuf from 'protobufjs';
 
 // --- STRENGE KONFIGURATION ---
 if (!process.env.API_KEY) {
@@ -15,6 +16,71 @@ const API_KEY = process.env.API_KEY;
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './devices.json';
 const GEOFENCE_FILE = './geofences.json';
+
+// --- PROTOBUF DEFINITION ---
+const protoSource = `
+syntax = "proto3";
+message LocationUpdateProto {
+  string point_id = 1;
+  string device_id = 2;
+  string name = 3;
+  double lat = 4;
+  double lon = 5;
+  int32 battery = 6;
+  float temperature = 7;
+  float speed = 8;
+  float bearing = 9;
+  int64 timestamp = 10;
+  float accuracy = 11;
+  bool alarm_active = 12;
+  bool is_awake = 13;
+  bool is_watched = 14;
+  string fcm_token = 15;
+  string geofence_event = 16;
+  bool is_locked = 17;
+  bool is_motion = 18;
+  bool is_wifi = 19;
+  bool accident = 20;
+  int32 proximity_distance = 21;
+  bool proximity_enabled = 22;
+  double snapped_lat = 23;
+  double snapped_lon = 24;
+}
+message DeviceLocationProto {
+  string device_id = 1;
+  double lat = 2;
+  double lon = 3;
+  int32 battery = 4;
+  float temperature = 5;
+  float speed = 6;
+  float bearing = 7;
+  int64 timestamp = 8;
+  float accuracy = 9;
+  bool offline = 10;
+  string name = 11;
+  string status = 12;
+  bool alarm_active = 13;
+  bool is_awake = 14;
+  bool is_watched = 15;
+  string watcher_name = 16;
+  string fcm_token = 17;
+  bool is_locked = 18;
+  bool is_motion = 19;
+  bool is_wifi = 20;
+  bool accident = 21;
+  double snapped_lat = 22;
+  double snapped_lon = 23;
+  string geofence_event = 24;
+  string motion_state = 25;
+}
+message DeviceListProto {
+  repeated DeviceLocationProto devices = 1;
+}
+`;
+const root = protobuf.parse(protoSource).root;
+const LocationUpdateProto = root.lookupType("LocationUpdateProto");
+const DeviceLocationProto = root.lookupType("DeviceLocationProto");
+const DeviceListProto = root.lookupType("DeviceListProto");
 
 // --- FIREBASE INITIALISIERUNG ---
 async function initFirebase() {
@@ -92,7 +158,6 @@ app.use((req, res, next) => {
     if (providedKey !== serverKey) {
         const clientIp = req.headers['x-forwarded-for'] || req.ip;
         console.warn(`⚠️ AUTH-FEHLER [${clientIp}]: ${req.method} ${req.path}`);
-        console.warn(`   Header erhalten:`, JSON.stringify(req.headers)); // 🔥 LOGGT HEADER
         return res.sendStatus(401);
     }
     next();
@@ -102,6 +167,7 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
 
 app.use(bodyParser.json());
+app.use(bodyParser.raw({ type: 'application/x-protobuf', limit: '50kb' }));
 app.use('/location/binary', bodyParser.raw({ type: 'application/octet-stream', limit: '50kb' }));
 
 let devices = {};
@@ -141,7 +207,6 @@ setInterval(() => {
 
     for (const id in devices) {
         const d = devices[id];
-        // 🔥 13 Minuten (12 Min Intervall + 1 Min Puffer)
         if (d.status !== 'offline' && (now - d.lastSeen > 780000)) {
             d.status = 'offline';
             io.to(id).emit('location_update', d);
@@ -168,19 +233,16 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-// --- EVENT LOGIK (MODULAR) ---
+// --- EVENT LOGIK ---
 async function handleEvents(id, data) {
     const now = Date.now();
     const device = devices[id];
     if (!device) return;
 
-    // Geofence
     if (data.geofenceEvent && !["heartbeat", "token_refresh", "audit_check"].includes(data.geofenceEvent)) {
         const key = `gf:${id}:${data.geofenceEvent}`;
-        // 🔥 Cooldown auf 10 Minuten erhöht, um "Flattern" an Zonengrenzen zu dämpfen
         if (!lastPushTimes[key] || (now - lastPushTimes[key] > 600000)) {
             lastPushTimes[key] = now;
-            console.log(`📢 GEOFENCE EVENT [${id}]: ${data.geofenceEvent}`);
             broadcast(id, {
                 type: 'geofence_event',
                 zoneName: data.geofenceEvent.split(':')[1] || 'Zone',
@@ -190,7 +252,6 @@ async function handleEvents(id, data) {
         }
     }
 
-    // Accident
     if (data.accident === true) {
         const key = `acc:${id}`;
         if (!lastPushTimes[key] || (now - lastPushTimes[key] > 30000)) {
@@ -199,7 +260,6 @@ async function handleEvents(id, data) {
         }
     }
 
-    // Proximity
     if (data.proximityEnabled && data.lat && data.lon) {
         Object.values(devices).forEach(other => {
             if (id.localeCompare(other.deviceId) < 0 && other.lat && other.lon) {
@@ -230,7 +290,6 @@ function updateDevice(id, data) {
     const flags = data.flags || 0;
     const old = devices[id] || {};
 
-    // 🔥 LOGIK: Wir identifizieren, ob im aktuellen Paket ein Event steckt
     const incomingGeofenceEvent = data.geofenceEvent;
     const isAccident = (flags & 64) !== 0 || data.accident === true;
 
@@ -246,12 +305,8 @@ function updateDevice(id, data) {
         alarmActive: (flags & 128) !== 0 || (data.alarmActive !== undefined ? data.alarmActive : old.alarmActive) || false
     };
 
-    // 🔥 WICHTIG: Geofence-Events dürfen nicht im permanenten Status bleiben,
-    // sonst triggern sie bei JEDEM Standort-Update erneut (Duplicate Push).
     delete devices[id].geofenceEvent;
 
-    // Wir übergeben an handleEvents das merged Objekt für Kontext (lat/lon),
-    // aber erzwingen die Event-Felder auf den Stand von GENAU DIESEM Paket.
     handleEvents(id, {
         ...devices[id],
         geofenceEvent: incomingGeofenceEvent,
@@ -267,24 +322,14 @@ app.post('/devices/:id/alarm', (req, res) => {
     const active = req.query.active === 'true';
     if (!devices[id]) return res.sendStatus(404);
 
-    console.log(`🔔 ALARM-REQUEST: ${active ? 'START' : 'STOP'} für Gerät ${id}`);
-
     devices[id].alarmActive = active;
-    if (!active) devices[id].accident = false; // 🔥 Wenn Alarm gestoppt wird, löschen wir auch den Unfall-Status
+    if (!active) devices[id].accident = false;
 
     saveDevicesSafe();
-
-    // 🔥 Echtzeit-Update an alle Beobachter in diesem Raum
     io.to(id).emit('location_update', devices[id]);
-
-    // 🔥 COMMAND an das Gerät selbst senden (falls per WebSocket verbunden)
-    io.to(id).emit('command', {
-        deviceId: id,
-        action: active ? 'START_ALARM' : 'STOP_ALARM'
-    });
+    io.to(id).emit('command', { deviceId: id, action: active ? 'START_ALARM' : 'STOP_ALARM' });
 
     if (devices[id].fcmToken) {
-        console.log(`   -> Sende targeted Push an ${id}`);
         admin.messaging().send({
             data: {
                 type: active ? 'alarm' : 'stop_alarm',
@@ -293,7 +338,7 @@ app.post('/devices/:id/alarm', (req, res) => {
             },
             token: devices[id].fcmToken,
             android: { priority: 'high' }
-        }).catch(e => console.error("   -> Push Error:", e.message));
+        }).catch(() => {});
     }
     res.sendStatus(200);
 });
@@ -301,11 +346,7 @@ app.post('/devices/:id/alarm', (req, res) => {
 app.post('/devices/wakeup-all', (req, res) => {
     Object.values(devices).forEach(d => {
         if (d.fcmToken) {
-            admin.messaging().send({
-                data: { type: 'WAKEUP' },
-                token: d.fcmToken,
-                android: { priority: 'high' }
-            }).catch(() => {});
+            admin.messaging().send({ data: { type: 'WAKEUP' }, token: d.fcmToken, android: { priority: 'high' } }).catch(() => {});
         }
     });
     res.sendStatus(200);
@@ -325,11 +366,7 @@ app.post('/devices/:id/watch', (req, res) => {
     io.to(id).emit('location_update', devices[id]);
 
     if (devices[id].fcmToken) {
-        admin.messaging().send({
-            data: { type: 'WAKEUP', watcherName: watcherName || watcherId },
-            token: devices[id].fcmToken,
-            android: { priority: 'high' }
-        }).catch(() => {});
+        admin.messaging().send({ data: { type: 'WAKEUP', watcherName: watcherName || watcherId }, token: devices[id].fcmToken, android: { priority: 'high' } }).catch(() => {});
     }
     res.sendStatus(200);
 });
@@ -358,26 +395,25 @@ app.post('/geofences', async (req, res) => {
 
 app.delete('/geofences/:id', async (req, res) => {
     const id = req.params.id.trim();
-    const initialLen = geofences.length;
-
-    // 🔥 ROBUSTER VERGLEICH: Vergleiche IDs als Strings und trimme sie
     geofences = geofences.filter(g => String(g.id).trim() !== id);
-
-    if (geofences.length !== initialLen) {
-        console.log(`✅ Geofence gelöscht: ${id}`);
-        saveGeofencesSafe();
-        io.emit('geofences_updated', geofences);
-        res.sendStatus(200);
-    } else {
-        console.warn(`⚠️ Geofence zum Löschen nicht gefunden: ${id}`);
-        res.sendStatus(404);
-    }
+    saveGeofencesSafe();
+    io.emit('geofences_updated', geofences);
+    res.sendStatus(200);
 });
 
 app.post('/location', async (req, res) => {
-    const id = req.body.deviceId?.toLowerCase();
+    let data = req.body;
+    if (req.headers['content-type'] === 'application/x-protobuf' && Buffer.isBuffer(req.body)) {
+        try {
+            data = LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: true });
+        } catch (e) {
+            console.error("Protobuf Error:", e);
+            return res.status(400).send("Protobuf Error");
+        }
+    }
+    const id = data.deviceId?.toLowerCase();
     if (!id) return res.sendStatus(400);
-    updateDevice(id, req.body);
+    updateDevice(id, data);
     saveDevicesSafe();
     io.to(id).emit('location_update', devices[id]);
     res.sendStatus(200);
@@ -386,31 +422,16 @@ app.post('/location', async (req, res) => {
 app.post('/location/update-batch', async (req, res) => {
     const batch = req.body;
     if (!Array.isArray(batch)) return res.sendStatus(400);
-
     batch.forEach(item => {
         const id = item.deviceId?.toLowerCase();
         if (id) updateDevice(id, item);
     });
-
     saveDevicesSafe();
-    // Wir nehmen an, dass der Batch von einem Gerät kommt, oder wir emitten für alle
     if (batch.length > 0 && batch[0].deviceId) {
         const firstId = batch[0].deviceId.toLowerCase();
         io.to(firstId).emit('location_update', devices[firstId]);
     }
     res.sendStatus(200);
-});
-
-app.post('/location/clear/:id', (req, res) => {
-    const id = req.params.id.toLowerCase();
-    if (devices[id]) {
-        // Da wir keine History auf dem Server speichern (nur den letzten Punkt),
-        // setzen wir hier einfach die letzten Koordinaten zurück, falls gewünscht.
-        // Oder wir lassen es als No-Op für die Kompatibilität.
-        res.sendStatus(200);
-    } else {
-        res.sendStatus(404);
-    }
 });
 
 app.post('/location/binary', async (req, res) => {
@@ -419,7 +440,7 @@ app.post('/location/binary', async (req, res) => {
 
     try {
         let offset = 0;
-        const safeRead = (size) => { if (offset + size > buffer.length) throw new Error(`EOF (Need ${size}, have ${buffer.length - offset})`); };
+        const safeRead = (size) => { if (offset + size > buffer.length) throw new Error(`EOF`); };
 
         safeRead(1); const version = buffer.readUInt8(offset++);
         if (version !== 1) return res.sendStatus(400);
@@ -455,7 +476,6 @@ app.post('/location/binary', async (req, res) => {
                 const dLon = buffer.readInt16LE(offset) / 10000000.0; offset += 2;
                 const spd = buffer.readInt8(offset++) / 10.0;
                 flg = buffer.readUInt8(offset++);
-
                 ts = lastTs + dt; lat = lastLat + dLat; lon = lastLon + dLon;
                 updateDevice(deviceId, { deviceId, name: deviceName, lat, lon, timestamp: ts, speed: spd, flags: flg });
             }
@@ -464,14 +484,30 @@ app.post('/location/binary', async (req, res) => {
         saveDevicesSafe();
         io.to(deviceId).emit('location_update', devices[deviceId]);
         res.sendStatus(200);
-    } catch (e) { console.error("Binary Crash prevented:", e.message); res.sendStatus(400); }
+    } catch (e) { res.sendStatus(400); }
 });
 
-app.get('/devices', (req, res) => res.json(Object.values(devices)));
+app.get('/devices', (req, res) => {
+    const deviceList = Object.values(devices);
+    if (req.headers['accept'] === 'application/x-protobuf') {
+        const message = DeviceListProto.create({ devices: deviceList });
+        const buffer = DeviceListProto.encode(message).finish();
+        res.setHeader('Content-Type', 'application/x-protobuf');
+        return res.send(buffer);
+    }
+    res.json(deviceList);
+});
 
 app.get('/devices/:id', (req, res) => {
     const id = req.params.id.toLowerCase();
     if (!devices[id]) return res.sendStatus(404);
+    if (req.headers['accept'] === 'application/x-protobuf') {
+        const message = DeviceLocationProto.create(devices[id]);
+        const buffer = DeviceLocationProto.encode(message).finish();
+        res.setHeader('Content-Type', 'application/x-protobuf');
+        return res.send(buffer);
+    }
     res.json(devices[id]);
 });
-server.listen(PORT, () => console.log(`🚀 Final Production GPS Server online auf Port ${PORT}`));
+
+server.listen(PORT, () => console.log(`🚀 GPS Server online auf Port ${PORT}`));
