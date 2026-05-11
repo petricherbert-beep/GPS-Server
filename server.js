@@ -90,13 +90,14 @@ const DeviceListProto = root.lookupType("DeviceListProto");
 function mapProtoToApp(data) {
     if (!data) return data;
     const mapped = { ...data };
-    if (data.device_id) mapped.deviceId = data.device_id;
-    if (data.point_id) mapped.pointId = data.point_id;
+    // 🔥 FIX: Nutze explizite undefined-Prüfung statt Truthy-Check
+    if (data.device_id !== undefined) mapped.deviceId = data.device_id;
+    if (data.point_id !== undefined) mapped.pointId = data.point_id;
     if (data.alarm_active !== undefined) mapped.alarmActive = data.alarm_active;
     if (data.is_awake !== undefined) mapped.isAwake = data.is_awake;
     if (data.is_watched !== undefined) mapped.isWatched = data.is_watched;
-    if (data.fcm_token) mapped.fcmToken = data.fcm_token;
-    if (data.geofence_event) mapped.geofenceEvent = data.geofence_event;
+    if (data.fcm_token !== undefined) mapped.fcmToken = data.fcm_token;
+    if (data.geofence_event !== undefined) mapped.geofenceEvent = data.geofence_event;
     if (data.is_locked !== undefined) mapped.isLocked = data.is_locked;
     if (data.is_motion !== undefined) mapped.isMotion = data.is_motion;
     if (data.is_wifi !== undefined) mapped.isWifi = data.is_wifi;
@@ -104,6 +105,9 @@ function mapProtoToApp(data) {
     if (data.proximity_enabled !== undefined) mapped.proximityEnabled = data.proximity_enabled;
     if (data.snapped_lat !== undefined) mapped.snappedLat = data.snapped_lat;
     if (data.snapped_lon !== undefined) mapped.snappedLon = data.snapped_lon;
+    if (data.snapped_lat === 0 && data.snapped_lon === 0) {
+        delete mapped.snappedLat; delete mapped.snappedLon;
+    }
     return mapped;
 }
 
@@ -204,7 +208,8 @@ app.post('/location', async (req, res) => {
     let data = req.body;
     if (req.headers['content-type'] === 'application/x-protobuf' && Buffer.isBuffer(req.body)) {
         try {
-            data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: true }));
+            // 🔥 longs: Number verhindert String-Konvertierung von Zeitstempeln
+            data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: true, longs: Number }));
         } catch (e) { return res.status(400).send("Protobuf Error"); }
     }
     const id = data.deviceId?.toLowerCase();
@@ -220,7 +225,7 @@ app.post('/location/update-batch', async (req, res) => {
     if (req.headers['content-type'] === 'application/x-protobuf' && Buffer.isBuffer(req.body)) {
         try {
             const decoded = LocationBatchProto.decode(req.body);
-            batch = (decoded.updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, { defaults: true })));
+            batch = (decoded.updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, { defaults: true, longs: Number })));
         } catch (e) { return res.status(400).send("Protobuf Batch Error"); }
     } else {
         batch = req.body;
