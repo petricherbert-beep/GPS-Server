@@ -105,6 +105,7 @@ function mapProtoToApp(data) {
     if (data.proximity_enabled !== undefined) mapped.proximityEnabled = data.proximity_enabled;
     if (data.snapped_lat !== undefined) mapped.snappedLat = data.snapped_lat;
     if (data.snapped_lon !== undefined) mapped.snappedLon = data.snapped_lon;
+    if (data.accident !== undefined) mapped.accident = data.accident;
     if (data.snapped_lat === 0 && data.snapped_lon === 0) {
         delete mapped.snappedLat; delete mapped.snappedLon;
     }
@@ -173,14 +174,33 @@ function saveDevicesSafe() {
 }
 
 async function init() {
-    try { devices = JSON.parse(await fs.readFile(DATA_FILE, 'utf8')); } catch (e) { devices = {}; }
+    try {
+        devices = JSON.parse(await fs.readFile(DATA_FILE, 'utf8'));
+        // 🔥 SANITÄRUNG: Verhindere negative oder Objekt-Zeitstempel aus Altlasten
+        for (const id in devices) {
+            const d = devices[id];
+            if (typeof d.timestamp === 'object' || d.timestamp < 0) {
+                d.timestamp = Date.now();
+            }
+        }
+    } catch (e) { devices = {}; }
     try { geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8')); } catch (e) { geofences = []; }
 }
 init();
 
 function updateDevice(id, data) {
     const old = devices[id] || {};
-    devices[id] = { ...old, ...data, status: 'online', lastSeen: Date.now() };
+    // 🔥 FORCE OVERWRITE für kritische Flags (kein Erben aus Altlasten)
+    devices[id] = {
+        ...old,
+        ...data,
+        isLocked: data.isLocked ?? false,
+        isMotion: data.isMotion ?? false,
+        isWifi: data.isWifi ?? false,
+        accident: data.accident ?? false,
+        status: 'online',
+        lastSeen: Date.now()
+    };
     delete devices[id].geofenceEvent;
     handleEvents(id, { ...devices[id], geofenceEvent: data.geofenceEvent });
 }
@@ -206,9 +226,9 @@ function broadcast(senderId, payload) {
 
 app.post('/location', async (req, res) => {
     let data = req.body;
-    if (req.headers['content-type'] === 'application/x-protobuf' && Buffer.isBuffer(req.body)) {
+    const contentType = req.headers['content-type'] || '';
+    if (contentType.includes('application/x-protobuf') && Buffer.isBuffer(req.body)) {
         try {
-            // 🔥 longs: Number verhindert String-Konvertierung von Zeitstempeln
             data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: true, longs: Number }));
         } catch (e) { return res.status(400).send("Protobuf Error"); }
     }
@@ -222,7 +242,8 @@ app.post('/location', async (req, res) => {
 
 app.post('/location/update-batch', async (req, res) => {
     let batch = [];
-    if (req.headers['content-type'] === 'application/x-protobuf' && Buffer.isBuffer(req.body)) {
+    const contentType = req.headers['content-type'] || '';
+    if (contentType.includes('application/x-protobuf') && Buffer.isBuffer(req.body)) {
         try {
             const decoded = LocationBatchProto.decode(req.body);
             batch = (decoded.updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, { defaults: true, longs: Number })));
