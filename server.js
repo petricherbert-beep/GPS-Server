@@ -274,7 +274,8 @@ app.post('/location/update-batch', async (req, res) => {
 
 app.get('/devices', (req, res) => {
     const list = Object.values(devices);
-    if (req.headers['accept'] === 'application/x-protobuf') {
+    const accept = req.headers['accept'] || '';
+    if (accept.includes('application/x-protobuf')) {
         const buffer = DeviceListProto.encode(DeviceListProto.create({ devices: list })).finish();
         res.setHeader('Content-Type', 'application/x-protobuf');
         return res.send(buffer);
@@ -285,7 +286,8 @@ app.get('/devices', (req, res) => {
 app.get('/devices/:id', (req, res) => {
     const id = req.params.id.toLowerCase();
     if (!devices[id]) return res.sendStatus(404);
-    if (req.headers['accept'] === 'application/x-protobuf') {
+    const accept = req.headers['accept'] || '';
+    if (accept.includes('application/x-protobuf')) {
         const buffer = DeviceLocationProto.encode(DeviceLocationProto.create(devices[id])).finish();
         res.setHeader('Content-Type', 'application/x-protobuf');
         return res.send(buffer);
