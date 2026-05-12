@@ -236,7 +236,8 @@ app.post('/location', async (req, res) => {
     const contentType = req.headers['content-type'] || '';
     if (contentType.includes('application/x-protobuf') && Buffer.isBuffer(req.body)) {
         try {
-            data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: true, longs: Number }));
+            // 🔥 FIX: defaults: false verhindert das Überschreiben mit leeren Werten
+            data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number }));
         } catch (e) { return res.status(400).send("Protobuf Error"); }
     }
     const id = data.deviceId?.toLowerCase();
