@@ -251,10 +251,15 @@ app.post('/location', async (req, res) => {
 app.post('/location/update-batch', async (req, res) => {
     let batch = [];
     const contentType = req.headers['content-type'] || '';
-    if (contentType.includes('application/x-protobuf') && Buffer.isBuffer(req.body)) {
+    if (contentType.includes('protobuf') || contentType.includes('octet-stream')) {
         try {
             const decoded = LocationBatchProto.decode(req.body);
-            batch = (decoded.updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, { defaults: true, longs: Number })));
+            // 🔥 FIX: defaults: true + camelcase: true stellt sicher, dass deviceId IMMER vorhanden ist
+            batch = (decoded.updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, {
+                defaults: true,
+                longs: Number,
+                camelcase: true
+            })));
         } catch (e) { return res.status(400).send("Protobuf Batch Error"); }
     } else {
         batch = req.body;
