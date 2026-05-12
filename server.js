@@ -90,23 +90,24 @@ const DeviceListProto = root.lookupType("DeviceListProto");
 function mapProtoToApp(data) {
     if (!data) return data;
     const mapped = { ...data };
-    // 🔥 FIX: Nutze explizite undefined-Prüfung statt Truthy-Check
-    if (data.device_id !== undefined) mapped.deviceId = data.device_id;
-    if (data.point_id !== undefined) mapped.pointId = data.point_id;
-    if (data.alarm_active !== undefined) mapped.alarmActive = data.alarm_active;
-    if (data.is_awake !== undefined) mapped.isAwake = data.is_awake;
-    if (data.is_watched !== undefined) mapped.isWatched = data.is_watched;
-    if (data.fcm_token !== undefined) mapped.fcmToken = data.fcm_token;
-    if (data.geofence_event !== undefined) mapped.geofenceEvent = data.geofence_event;
-    if (data.is_locked !== undefined) mapped.isLocked = data.is_locked;
-    if (data.is_motion !== undefined) mapped.isMotion = data.is_motion;
-    if (data.is_wifi !== undefined) mapped.isWifi = data.is_wifi;
-    if (data.proximity_distance !== undefined) mapped.proximityDistance = data.proximity_distance;
-    if (data.proximity_enabled !== undefined) mapped.proximityEnabled = data.proximity_enabled;
-    if (data.snapped_lat !== undefined) mapped.snappedLat = data.snapped_lat;
-    if (data.snapped_lon !== undefined) mapped.snappedLon = data.snapped_lon;
-    if (data.accident !== undefined) mapped.accident = data.accident;
-    if (data.snapped_lat === 0 && data.snapped_lon === 0) {
+    // 🔥 FIX: Unterstütze sowohl camelCase (ProtoJS default) als auch snake_case (Schema)
+    mapped.deviceId = data.deviceId || data.device_id;
+    mapped.pointId = data.pointId || data.point_id;
+    mapped.alarmActive = (data.alarmActive !== undefined) ? data.alarmActive : data.alarm_active;
+    mapped.isAwake = (data.isAwake !== undefined) ? data.isAwake : data.is_awake;
+    mapped.isWatched = (data.isWatched !== undefined) ? data.isWatched : data.is_watched;
+    mapped.fcmToken = data.fcmToken || data.fcm_token;
+    mapped.geofenceEvent = data.geofenceEvent || data.geofence_event;
+    mapped.isLocked = (data.isLocked !== undefined) ? data.isLocked : data.is_locked;
+    mapped.isMotion = (data.isMotion !== undefined) ? data.isMotion : data.is_motion;
+    mapped.isWifi = (data.isWifi !== undefined) ? data.isWifi : data.is_wifi;
+    mapped.proximityDistance = data.proximityDistance || data.proximity_distance;
+    mapped.proximityEnabled = (data.proximityEnabled !== undefined) ? data.proximityEnabled : data.proximity_enabled;
+    mapped.snappedLat = data.snappedLat || data.snapped_lat;
+    mapped.snappedLon = data.snappedLon || data.snapped_lon;
+    mapped.accident = (data.accident !== undefined) ? data.accident : data.accident;
+
+    if (mapped.snappedLat === 0 && mapped.snappedLon === 0) {
         delete mapped.snappedLat; delete mapped.snappedLon;
     }
     return mapped;
