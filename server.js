@@ -90,7 +90,7 @@ const DeviceListProto = root.lookupType("DeviceListProto");
 function mapProtoToApp(data) {
     if (!data) return data;
     const mapped = { ...data };
-    // 🔥 FIX: Unterstütze sowohl camelCase (ProtoJS default) als auch snake_case (Schema)
+    // FIX: Unterstütze sowohl camelCase (ProtoJS default) als auch snake_case (Schema)
     mapped.deviceId = data.deviceId || data.device_id;
     mapped.pointId = data.pointId || data.point_id;
     mapped.alarmActive = (data.alarmActive !== undefined) ? data.alarmActive : data.alarm_active;
@@ -134,12 +134,24 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 // --- 🌐 SOCKET.IO LOGIK ---
 io.on('connection', (socket) => {
-    socket.on('join_device', (id) => {
-        if (!id) return;
-        const deviceId = id.toLowerCase().trim();
-        socket.join(deviceId);
-        if (devices[deviceId]) socket.emit('location_update', devices[deviceId]);
+    // 3. Socket.IO minimal absichern
+    socket.on('join_device', (data) => {
+        if (!data) return;
+        const deviceId = (typeof data === 'string' ? data : data.deviceId)?.toLowerCase().trim();
+        const apiKey = typeof data === 'object' ? data.apiKey : null;
+
+        // Wenn apiKey mitgesendet wird, validieren
+        if (apiKey && apiKey !== API_KEY) {
+            console.warn(`⚠️ Socket Auth-Fehler für: ${deviceId}`);
+            return;
+        }
+
+        if (deviceId) {
+            socket.join(deviceId);
+            if (devices[deviceId]) socket.emit('location_update', devices[deviceId]);
+        }
     });
+
     socket.on('leave_device', (id) => {
         if (!id) return;
         const deviceId = id.toLowerCase().trim();
@@ -158,17 +170,18 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
 
 app.use(bodyParser.json());
+// BodyParser robuster machen
 app.use(bodyParser.raw({
-    type: (req) => {
-        const ct = req.headers['content-type'] || '';
-        return ct.includes('protobuf') || ct.includes('octet-stream');
-    },
+    type: () => true,
     limit: '200kb'
 }));
 
 let devices = {};
 let geofences = [];
 let lastPushTimes = {};
+
+// 1. Save-Queue hinzufügen
+let savePromise = Promise.resolve();
 
 async function atomicWrite(file, data) {
     const tmp = file + '.tmp';
@@ -177,13 +190,16 @@ async function atomicWrite(file, data) {
 }
 
 function saveDevicesSafe() {
-    atomicWrite(DATA_FILE, JSON.stringify(devices, null, 2)).catch(e => console.error(e));
+    savePromise = savePromise
+        .then(() => atomicWrite(DATA_FILE, JSON.stringify(devices, null, 2)))
+        .catch(console.error);
+    return savePromise;
 }
 
 async function init() {
     try {
         devices = JSON.parse(await fs.readFile(DATA_FILE, 'utf8'));
-        // 🔥 SANITÄRUNG: Verhindere negative oder Objekt-Zeitstempel aus Altlasten
+        // SANITÄRUNG: Verhindere negative oder Objekt-Zeitstempel aus Altlasten
         for (const id in devices) {
             const d = devices[id];
             if (typeof d.timestamp === 'object' || d.timestamp < 0) {
@@ -195,16 +211,47 @@ async function init() {
 }
 init();
 
+// 2. Offline-Erkennung + 5. lastPushTimes cleanup
+setInterval(() => {
+    const now = Date.now();
+    let changed = false;
+
+    for (const id in devices) {
+        if (devices[id].status !== 'offline' && (now - devices[id].lastSeen > 120000)) {
+            devices[id].status = 'offline';
+            io.to(id).emit('location_update', devices[id]);
+            changed = true;
+        }
+    }
+
+    for (const key in lastPushTimes) {
+        if (now - lastPushTimes[key] > 86400000) {
+            delete lastPushTimes[key];
+        }
+    }
+
+    if (changed) saveDevicesSafe();
+}, 30000);
+
 function updateDevice(id, data) {
+    // 4. Eingaben minimal validieren
+    if (data.lat !== undefined && data.lon !== undefined) {
+        if (typeof data.lat !== 'number' || typeof data.lon !== 'number' ||
+            data.lat < -90 || data.lat > 90 || data.lon < -180 || data.lon > 180) {
+            console.warn(`⚠️ Ungültige Koordinaten für ${id}: ${data.lat}, ${data.lon}`);
+            return;
+        }
+    }
+
     const old = devices[id] || {};
-    // 🔥 FORCE OVERWRITE für kritische Flags (kein Erben aus Altlasten)
+    // FORCE OVERWRITE für kritische Flags (kein Erben aus Altlasten)
     devices[id] = {
         ...old,
         ...data,
-        isLocked: data.isLocked ?? false,
-        isMotion: data.isMotion ?? false,
-        isWifi: data.isWifi ?? false,
-        accident: data.accident ?? false,
+        isLocked: data.isLocked ?? old.isLocked ?? false,
+        isMotion: data.isMotion ?? old.isMotion ?? false,
+        isWifi: data.isWifi ?? old.isWifi ?? false,
+        accident: data.accident ?? old.accident ?? false,
         status: 'online',
         lastSeen: Date.now()
     };
@@ -233,12 +280,14 @@ function broadcast(senderId, payload) {
 
 app.post('/location', async (req, res) => {
     let data = req.body;
-    const contentType = req.headers['content-type'] || '';
-    if (contentType.includes('application/x-protobuf') && Buffer.isBuffer(req.body)) {
+    // Server robuster machen: Content-Type ignorieren, wenn Buffer da ist
+    if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         try {
-            // 🔥 FIX: defaults: false verhindert das Überschreiben mit leeren Werten
             data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number }));
-        } catch (e) { return res.status(400).send("Protobuf Error"); }
+        } catch (e) {
+            console.error("PROTO ERROR:", e);
+            return res.status(400).send("Protobuf Error");
+        }
     }
     const id = data.deviceId?.toLowerCase();
     if (!id) return res.sendStatus(400);
@@ -250,17 +299,14 @@ app.post('/location', async (req, res) => {
 
 app.post('/location/update-batch', async (req, res) => {
     let batch = [];
-    const contentType = req.headers['content-type'] || '';
-    if (contentType.includes('protobuf') || contentType.includes('octet-stream')) {
+    if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         try {
             const decoded = LocationBatchProto.decode(req.body);
-            // 🔥 FIX: defaults: true + camelcase: true stellt sicher, dass deviceId IMMER vorhanden ist
-            batch = (decoded.updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, {
-                defaults: true,
-                longs: Number,
-                camelcase: true
-            })));
-        } catch (e) { return res.status(400).send("Protobuf Batch Error"); }
+            batch = (decoded.updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, { defaults: false, longs: Number })));
+        } catch (e) {
+            console.error("PROTO BATCH ERROR:", e);
+            return res.status(400).send("Protobuf Batch Error");
+        }
     } else {
         batch = req.body;
     }
