@@ -45,6 +45,7 @@ message LocationUpdateProto {
   bool proximity_enabled = 22;
   double snapped_lat = 23;
   double snapped_lon = 24;
+  bytes encrypted_data = 30;
 }
 message LocationBatchProto {
   repeated LocationUpdateProto updates = 1;
@@ -75,6 +76,7 @@ message DeviceLocationProto {
   double snapped_lon = 23;
   string geofence_event = 24;
   string motion_state = 25;
+  bytes encrypted_data = 30;
 }
 message DeviceListProto {
   repeated DeviceLocationProto devices = 1;
@@ -106,6 +108,7 @@ function mapProtoToApp(data) {
     mapped.snappedLat = data.snappedLat || data.snapped_lat;
     mapped.snappedLon = data.snappedLon || data.snapped_lon;
     mapped.accident = (data.accident !== undefined) ? data.accident : data.accident;
+    mapped.encryptedData = data.encryptedData || data.encrypted_data;
 
     if (mapped.snappedLat === 0 && mapped.snappedLon === 0) {
         delete mapped.snappedLat; delete mapped.snappedLon;
@@ -358,5 +361,22 @@ app.post('/devices/:id/alarm', (req, res) => {
 });
 
 app.get('/geofences', (req, res) => res.json(geofences));
+
+app.post('/geofences', async (req, res) => {
+    const gf = req.body;
+    if (!gf.id) return res.sendStatus(400);
+    // Ersetzen oder Hinzufügen
+    geofences = geofences.filter(item => item.id !== gf.id);
+    geofences.push(gf);
+    await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    res.sendStatus(200);
+});
+
+app.delete('/geofences/:id', async (req, res) => {
+    const id = req.params.id;
+    geofences = geofences.filter(item => item.id !== id);
+    await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    res.sendStatus(200);
+});
 
 server.listen(PORT, () => console.log(`🚀 GPS Server online on Port ${PORT}`));
