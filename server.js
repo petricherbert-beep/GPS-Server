@@ -360,6 +360,65 @@ app.post('/devices/:id/alarm', (req, res) => {
     res.sendStatus(200);
 });
 
+// 🔥 NEU: WATCH LOGIK
+app.post('/devices/:id/watch', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const watcherId = req.query.watcherId;
+    const watcherName = req.query.watcherName || "Jemand";
+
+    if (!devices[id]) return res.sendStatus(404);
+
+    devices[id].isWatched = true;
+    devices[id].watcherName = watcherName;
+
+    // FCM Push an das Ziel-Gerät senden, damit es aufwacht
+    if (devices[id].fcmToken) {
+        admin.messaging().send({
+            data: {
+                type: 'watch_state',
+                state: 'true',
+                watcherName: watcherName,
+                targetId: id
+            },
+            token: devices[id].fcmToken,
+            android: { priority: 'high' }
+        }).catch(() => {});
+    }
+
+    res.sendStatus(200);
+});
+
+app.post('/devices/:id/unwatch', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    if (!devices[id]) return res.sendStatus(404);
+
+    devices[id].isWatched = false;
+    delete devices[id].watcherName;
+
+    if (devices[id].fcmToken) {
+        admin.messaging().send({
+            data: { type: 'watch_state', state: 'false' },
+            token: devices[id].fcmToken
+        }).catch(() => {});
+    }
+    res.sendStatus(200);
+});
+
+app.post('/devices/:id/wakeup', (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const watcherName = req.query.watcherName || "Zentrale";
+    if (!devices[id]) return res.sendStatus(404);
+
+    if (devices[id].fcmToken) {
+        admin.messaging().send({
+            data: { type: 'wakeup', watcherName: watcherName },
+            token: devices[id].fcmToken,
+            android: { priority: 'high' }
+        }).catch(() => {});
+    }
+    res.sendStatus(200);
+});
+
 app.get('/geofences', (req, res) => res.json(geofences));
 
 app.post('/geofences', async (req, res) => {
