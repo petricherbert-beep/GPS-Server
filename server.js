@@ -26,12 +26,12 @@ message LocationUpdateProto {
   string name = 3;
   double lat = 4;
   double lon = 5;
-  int32 battery = 6;
-  float temperature = 7;
-  float speed = 8;
-  float bearing = 9;
+  optional int32 battery = 6;
+  optional float temperature = 7;
+  optional float speed = 8;
+  optional float bearing = 9;
   int64 timestamp = 10;
-  float accuracy = 11;
+  optional float accuracy = 11;
   bool alarm_active = 12;
   bool is_awake = 13;
   bool is_watched = 14;
@@ -41,12 +41,12 @@ message LocationUpdateProto {
   bool is_motion = 18;
   bool is_wifi = 19;
   bool accident = 20;
-  int32 proximity_distance = 21;
-  bool proximity_enabled = 22;
-  double snapped_lat = 23;
-  double snapped_lon = 24;
-  double visual_lat = 25;
-  double visual_lon = 26;
+  optional int32 proximity_distance = 21;
+  optional bool proximity_enabled = 22;
+  optional double snapped_lat = 23;
+  optional double snapped_lon = 24;
+  optional double visual_lat = 25;
+  optional double visual_lon = 26;
   string motion_state = 27;
   bytes encrypted_data = 30;
 }
@@ -57,12 +57,12 @@ message DeviceLocationProto {
   string device_id = 1;
   double lat = 2;
   double lon = 3;
-  int32 battery = 4;
-  float temperature = 5;
-  float speed = 6;
-  float bearing = 7;
+  optional int32 battery = 4;
+  optional float temperature = 5;
+  optional float speed = 6;
+  optional float bearing = 7;
   int64 timestamp = 8;
-  float accuracy = 9;
+  optional float accuracy = 9;
   bool offline = 10;
   string name = 11;
   string status = 12;
@@ -75,10 +75,10 @@ message DeviceLocationProto {
   bool is_motion = 19;
   bool is_wifi = 20;
   bool accident = 21;
-  double snapped_lat = 22;
-  double snapped_lon = 23;
-  double visual_lat = 26;
-  double visual_lon = 27;
+  optional double snapped_lat = 22;
+  optional double snapped_lon = 23;
+  optional double visual_lat = 26;
+  optional double visual_lon = 27;
   string geofence_event = 24;
   string motion_state = 25;
   bytes encrypted_data = 30;
@@ -97,28 +97,32 @@ const DeviceListProto = root.lookupType("DeviceListProto");
 function mapProtoToApp(data) {
     if (!data) return data;
     const mapped = { ...data };
-    // FIX: Unterstütze sowohl camelCase (ProtoJS default) als auch snake_case (Schema)
-    // Und erzwinge Booleans auf 'false', falls sie im Object fehlen (defaults:false)
+
+    // ProtoJS ordnet snake_case Felder automatisch camelCase zu (visual_lat -> visualLat)
+    // Wir muessen hier sicherstellen, dass wir die Felder finden, falls defaults:false aktiv war.
+
     mapped.deviceId = data.deviceId || data.device_id;
     mapped.pointId = data.pointId || data.point_id;
 
+    // Boolean Status Flags (Defaults erzwingen, falls undefined)
     mapped.alarmActive = (data.alarmActive !== undefined) ? data.alarmActive : (data.alarm_active !== undefined ? data.alarm_active : false);
     mapped.isAwake = (data.isAwake !== undefined) ? data.isAwake : (data.is_awake !== undefined ? data.is_awake : false);
     mapped.isWatched = (data.isWatched !== undefined) ? data.isWatched : (data.is_watched !== undefined ? data.is_watched : false);
-    mapped.fcmToken = data.fcmToken || data.fcm_token;
-    mapped.geofenceEvent = data.geofenceEvent || data.geofence_event;
     mapped.isLocked = (data.isLocked !== undefined) ? data.isLocked : (data.is_locked !== undefined ? data.is_locked : false);
     mapped.isMotion = (data.isMotion !== undefined) ? data.isMotion : (data.is_motion !== undefined ? data.is_motion : false);
     mapped.isWifi = (data.isWifi !== undefined) ? data.isWifi : (data.is_wifi !== undefined ? data.is_wifi : false);
-    mapped.proximityDistance = data.proximityDistance || data.proximity_distance;
-    mapped.proximityEnabled = (data.proximityEnabled !== undefined) ? data.proximityEnabled : (data.proximity_enabled !== undefined ? data.proximity_enabled : false);
+    mapped.accident = (data.accident !== undefined) ? data.accident : (data.accident !== undefined ? data.accident : false);
+
+    mapped.fcmToken = data.fcmToken || data.fcm_token;
+    mapped.geofenceEvent = data.geofenceEvent || data.geofence_event;
+    mapped.motionState = data.motionState || data.motion_state;
+
+    // Optionale numerische Felder (Putz-Logik fuer 0, falls sie doch als 0 reinkommen)
+    // Aber durch 'optional' im Schema kommen sie nun meist als undefined, wenn sie fehlen.
     mapped.snappedLat = data.snappedLat || data.snapped_lat;
     mapped.snappedLon = data.snappedLon || data.snapped_lon;
     mapped.visualLat = data.visualLat || data.visual_lat;
     mapped.visualLon = data.visualLon || data.visual_lon;
-    mapped.motionState = data.motionState || data.motion_state;
-    mapped.accident = (data.accident !== undefined) ? data.accident : false;
-    mapped.encryptedData = data.encryptedData || data.encrypted_data;
 
     if (mapped.snappedLat === 0 && mapped.snappedLon === 0) {
         delete mapped.snappedLat; delete mapped.snappedLon;
@@ -147,13 +151,11 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 // --- 🌐 SOCKET.IO LOGIK ---
 io.on('connection', (socket) => {
-    // 3. Socket.IO minimal absichern
     socket.on('join_device', (data) => {
         if (!data) return;
         const deviceId = (typeof data === 'string' ? data : data.deviceId)?.toLowerCase().trim();
         const apiKey = typeof data === 'object' ? data.apiKey : null;
 
-        // Wenn apiKey mitgesendet wird, validieren
         if (apiKey && apiKey !== API_KEY) {
             console.warn(`⚠️ Socket Auth-Fehler für: ${deviceId}`);
             return;
@@ -183,7 +185,6 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
 
 app.use(bodyParser.json());
-// BodyParser robuster machen
 app.use(bodyParser.raw({
     type: () => true,
     limit: '200kb'
@@ -193,7 +194,6 @@ let devices = {};
 let geofences = [];
 let lastPushTimes = {};
 
-// 1. Save-Queue hinzufügen
 let savePromise = Promise.resolve();
 
 async function atomicWrite(file, data) {
@@ -212,7 +212,6 @@ function saveDevicesSafe() {
 async function init() {
     try {
         devices = JSON.parse(await fs.readFile(DATA_FILE, 'utf8'));
-        // SANITÄRUNG: Verhindere negative oder Objekt-Zeitstempel aus Altlasten
         for (const id in devices) {
             const d = devices[id];
             if (typeof d.timestamp === 'object' || d.timestamp < 0) {
@@ -224,7 +223,6 @@ async function init() {
 }
 init();
 
-// 2. Offline-Erkennung + 5. lastPushTimes cleanup
 setInterval(() => {
     const now = Date.now();
     let changed = false;
@@ -247,7 +245,6 @@ setInterval(() => {
 }, 30000);
 
 function updateDevice(id, data) {
-    // 4. Eingaben minimal validieren
     if (data.lat !== undefined && data.lon !== undefined) {
         if (typeof data.lat !== 'number' || typeof data.lon !== 'number' ||
             data.lat < -90 || data.lat > 90 || data.lon < -180 || data.lon > 180) {
@@ -258,46 +255,60 @@ function updateDevice(id, data) {
 
     const old = devices[id] || {};
 
-    // 🔥 ALARM STABILITY: Wenn ein Alarm über die API ausgelöst wurde,
-    // darf ein normales Update ihn nicht sofort löschen (Race Condition).
-    // Wir lassen den Alarm mindestens 30 Sekunden aktiv, bevor das Gerät ihn löschen darf.
     let alarmActive = data.alarmActive;
     if (old.alarmActive === true && data.alarmActive === false) {
-        const lastSeenDiff = Date.now() - (old.lastSeen || 0);
-        if (lastSeenDiff < 30000) {
-            console.log(`🛡️ Blocked alarm-clear for ${id} (Grace Period)`);
-            alarmActive = true;
-        }
+        if (Date.now() - (old.lastSeen || 0) < 30000) alarmActive = true;
     }
 
-    // FORCE OVERWRITE für kritische Flags (kein Erben aus Altlasten)
+    let accident = data.accident;
+    if (old.accident === true && data.accident === false) {
+        if (Date.now() - (old.lastSeen || 0) < 30000) accident = true;
+    }
+
     devices[id] = {
         ...old,
         ...data,
         alarmActive: alarmActive ?? old.alarmActive ?? false,
+        accident: accident ?? old.accident ?? false,
         isLocked: data.isLocked ?? old.isLocked ?? false,
         isMotion: data.isMotion ?? old.isMotion ?? false,
         isWifi: data.isWifi ?? old.isWifi ?? false,
-        accident: data.accident ?? old.accident ?? false,
         status: 'online',
         lastSeen: Date.now()
     };
     delete devices[id].geofenceEvent;
-    handleEvents(id, { ...devices[id], geofenceEvent: data.geofenceEvent });
+    handleEvents(id, { ...devices[id], geofenceEvent: data.geofenceEvent }, old);
 }
 
-async function handleEvents(id, data) {
+async function handleEvents(id, data, old) {
     const now = Date.now();
     const device = devices[id];
     if (!device) return;
 
     const IGNORE_EVENTS = ["heartbeat", "token_refresh", "audit_check", "token_init", "token_update", "app_visible", "self_watch_active"];
-
     if (data.geofenceEvent && !IGNORE_EVENTS.includes(data.geofenceEvent)) {
         const key = `gf:${id}:${data.geofenceEvent}`;
         if (!lastPushTimes[key] || (now - lastPushTimes[key] > 600000)) {
             lastPushTimes[key] = now;
             broadcast(id, { type: 'geofence_event', zoneName: data.geofenceEvent.split(':')[1] || 'Zone', deviceName: device.name || id, action: data.geofenceEvent.startsWith('enter') ? 'betreten' : 'verlassen' });
+        }
+    }
+
+    if (data.accident === true && old.accident !== true) {
+        const key = `acc:${id}`;
+        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 300000)) {
+            lastPushTimes[key] = now;
+            console.log(`🚨 ACCIDENT BROADCAST for ${id}`);
+            broadcast(id, { type: 'accident_alert', deviceName: device.name || id, user: device.name || id });
+        }
+    }
+
+    if (data.alarmActive === true && old.alarmActive !== true) {
+        const key = `alarm:${id}`;
+        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 300000)) {
+            lastPushTimes[key] = now;
+            console.log(`🔊 ALARM BROADCAST for ${id}`);
+            broadcast(id, { type: 'alarm', message: `${device.name || id} braucht Hilfe!`, deviceName: device.name || id });
         }
     }
 }
@@ -310,7 +321,6 @@ function broadcast(senderId, payload) {
 
 app.post(['/location', '/v1/location'], async (req, res) => {
     let data = req.body;
-    // Server robuster machen: Content-Type ignorieren, wenn Buffer da ist
     if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         try {
             data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number }));
@@ -387,7 +397,6 @@ app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], (req, res) => {
     res.sendStatus(200);
 });
 
-// 🔥 NEU: WATCH LOGIK
 app.post(['/devices/:id/watch', '/v1/devices/:id/watch'], (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId;
@@ -398,7 +407,6 @@ app.post(['/devices/:id/watch', '/v1/devices/:id/watch'], (req, res) => {
     devices[id].isWatched = true;
     devices[id].watcherName = watcherName;
 
-    // FCM Push an das Ziel-Gerät senden, damit es aufwacht
     if (devices[id].fcmToken) {
         admin.messaging().send({
             data: {
@@ -451,7 +459,6 @@ app.get(['/geofences', '/v1/geofences'], (req, res) => res.json(geofences));
 app.post(['/geofences', '/v1/geofences'], async (req, res) => {
     const gf = req.body;
     if (!gf.id) return res.sendStatus(400);
-    // Ersetzen oder Hinzufügen
     geofences = geofences.filter(item => item.id !== gf.id);
     geofences.push(gf);
     await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
@@ -476,7 +483,6 @@ app.delete(['/geofences/:id', '/v1/geofences/:id'], async (req, res) => {
 });
 
 app.post(['/location/clear/:id', '/v1/location/clear/:id'], (req, res) => {
-    // In dieser Minimal-Version löschen wir einfach das Gerät aus dem Speicher
     const id = req.params.id.toLowerCase();
     delete devices[id];
     saveDevicesSafe();
