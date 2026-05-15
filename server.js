@@ -253,10 +253,24 @@ function updateDevice(id, data) {
     }
 
     const old = devices[id] || {};
+
+    // 🔥 ALARM STABILITY: Wenn ein Alarm über die API ausgelöst wurde,
+    // darf ein normales Update ihn nicht sofort löschen (Race Condition).
+    // Wir lassen den Alarm mindestens 30 Sekunden aktiv, bevor das Gerät ihn löschen darf.
+    let alarmActive = data.alarmActive;
+    if (old.alarmActive === true && data.alarmActive === false) {
+        const lastSeenDiff = Date.now() - (old.lastSeen || 0);
+        if (lastSeenDiff < 30000) {
+            console.log(`🛡️ Blocked alarm-clear for ${id} (Grace Period)`);
+            alarmActive = true;
+        }
+    }
+
     // FORCE OVERWRITE für kritische Flags (kein Erben aus Altlasten)
     devices[id] = {
         ...old,
         ...data,
+        alarmActive: alarmActive ?? old.alarmActive ?? false,
         isLocked: data.isLocked ?? old.isLocked ?? false,
         isMotion: data.isMotion ?? old.isMotion ?? false,
         isWifi: data.isWifi ?? old.isWifi ?? false,
@@ -272,7 +286,10 @@ async function handleEvents(id, data) {
     const now = Date.now();
     const device = devices[id];
     if (!device) return;
-    if (data.geofenceEvent && !["heartbeat", "token_refresh", "audit_check"].includes(data.geofenceEvent)) {
+
+    const IGNORE_EVENTS = ["heartbeat", "token_refresh", "audit_check", "token_init", "token_update", "app_visible", "self_watch_active"];
+
+    if (data.geofenceEvent && !IGNORE_EVENTS.includes(data.geofenceEvent)) {
         const key = `gf:${id}:${data.geofenceEvent}`;
         if (!lastPushTimes[key] || (now - lastPushTimes[key] > 600000)) {
             lastPushTimes[key] = now;
