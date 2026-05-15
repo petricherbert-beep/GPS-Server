@@ -47,6 +47,7 @@ message LocationUpdateProto {
   double snapped_lon = 24;
   double visual_lat = 25;
   double visual_lon = 26;
+  string motion_state = 27;
   bytes encrypted_data = 30;
 }
 message LocationBatchProto {
@@ -97,23 +98,26 @@ function mapProtoToApp(data) {
     if (!data) return data;
     const mapped = { ...data };
     // FIX: Unterstütze sowohl camelCase (ProtoJS default) als auch snake_case (Schema)
+    // Und erzwinge Booleans auf 'false', falls sie im Object fehlen (defaults:false)
     mapped.deviceId = data.deviceId || data.device_id;
     mapped.pointId = data.pointId || data.point_id;
-    mapped.alarmActive = (data.alarmActive !== undefined) ? data.alarmActive : data.alarm_active;
-    mapped.isAwake = (data.isAwake !== undefined) ? data.isAwake : data.is_awake;
-    mapped.isWatched = (data.isWatched !== undefined) ? data.isWatched : data.is_watched;
+
+    mapped.alarmActive = (data.alarmActive !== undefined) ? data.alarmActive : (data.alarm_active !== undefined ? data.alarm_active : false);
+    mapped.isAwake = (data.isAwake !== undefined) ? data.isAwake : (data.is_awake !== undefined ? data.is_awake : false);
+    mapped.isWatched = (data.isWatched !== undefined) ? data.isWatched : (data.is_watched !== undefined ? data.is_watched : false);
     mapped.fcmToken = data.fcmToken || data.fcm_token;
     mapped.geofenceEvent = data.geofenceEvent || data.geofence_event;
-    mapped.isLocked = (data.isLocked !== undefined) ? data.isLocked : data.is_locked;
-    mapped.isMotion = (data.isMotion !== undefined) ? data.isMotion : data.is_motion;
-    mapped.isWifi = (data.isWifi !== undefined) ? data.isWifi : data.is_wifi;
+    mapped.isLocked = (data.isLocked !== undefined) ? data.isLocked : (data.is_locked !== undefined ? data.is_locked : false);
+    mapped.isMotion = (data.isMotion !== undefined) ? data.isMotion : (data.is_motion !== undefined ? data.is_motion : false);
+    mapped.isWifi = (data.isWifi !== undefined) ? data.isWifi : (data.is_wifi !== undefined ? data.is_wifi : false);
     mapped.proximityDistance = data.proximityDistance || data.proximity_distance;
-    mapped.proximityEnabled = (data.proximityEnabled !== undefined) ? data.proximityEnabled : data.proximity_enabled;
+    mapped.proximityEnabled = (data.proximityEnabled !== undefined) ? data.proximityEnabled : (data.proximity_enabled !== undefined ? data.proximity_enabled : false);
     mapped.snappedLat = data.snappedLat || data.snapped_lat;
     mapped.snappedLon = data.snappedLon || data.snapped_lon;
     mapped.visualLat = data.visualLat || data.visual_lat;
     mapped.visualLon = data.visualLon || data.visual_lon;
-    mapped.accident = (data.accident !== undefined) ? data.accident : data.accident;
+    mapped.motionState = data.motionState || data.motion_state;
+    mapped.accident = (data.accident !== undefined) ? data.accident : false;
     mapped.encryptedData = data.encryptedData || data.encrypted_data;
 
     if (mapped.snappedLat === 0 && mapped.snappedLon === 0) {
