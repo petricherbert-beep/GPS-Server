@@ -45,6 +45,8 @@ message LocationUpdateProto {
   bool proximity_enabled = 22;
   double snapped_lat = 23;
   double snapped_lon = 24;
+  double visual_lat = 25;
+  double visual_lon = 26;
   bytes encrypted_data = 30;
 }
 message LocationBatchProto {
@@ -74,6 +76,8 @@ message DeviceLocationProto {
   bool accident = 21;
   double snapped_lat = 22;
   double snapped_lon = 23;
+  double visual_lat = 26;
+  double visual_lon = 27;
   string geofence_event = 24;
   string motion_state = 25;
   bytes encrypted_data = 30;
@@ -107,6 +111,8 @@ function mapProtoToApp(data) {
     mapped.proximityEnabled = (data.proximityEnabled !== undefined) ? data.proximityEnabled : data.proximity_enabled;
     mapped.snappedLat = data.snappedLat || data.snapped_lat;
     mapped.snappedLon = data.snappedLon || data.snapped_lon;
+    mapped.visualLat = data.visualLat || data.visual_lat;
+    mapped.visualLon = data.visualLon || data.visual_lon;
     mapped.accident = (data.accident !== undefined) ? data.accident : data.accident;
     mapped.encryptedData = data.encryptedData || data.encrypted_data;
 
@@ -281,7 +287,7 @@ function broadcast(senderId, payload) {
     });
 }
 
-app.post('/location', async (req, res) => {
+app.post(['/location', '/v1/location'], async (req, res) => {
     let data = req.body;
     // Server robuster machen: Content-Type ignorieren, wenn Buffer da ist
     if (Buffer.isBuffer(req.body) && req.body.length > 0) {
@@ -300,7 +306,7 @@ app.post('/location', async (req, res) => {
     res.sendStatus(200);
 });
 
-app.post('/location/update-batch', async (req, res) => {
+app.post(['/location/update-batch', '/v1/location/batch'], async (req, res) => {
     let batch = [];
     if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         try {
@@ -326,7 +332,7 @@ app.post('/location/update-batch', async (req, res) => {
     res.sendStatus(200);
 });
 
-app.get('/devices', (req, res) => {
+app.get(['/devices', '/v1/devices'], (req, res) => {
     const list = Object.values(devices);
     const accept = req.headers['accept'] || '';
     if (accept.includes('application/x-protobuf')) {
@@ -337,7 +343,7 @@ app.get('/devices', (req, res) => {
     res.json(list);
 });
 
-app.get('/devices/:id', (req, res) => {
+app.get(['/devices/:id', '/v1/devices/:id'], (req, res) => {
     const id = req.params.id.toLowerCase();
     if (!devices[id]) return res.sendStatus(404);
     const accept = req.headers['accept'] || '';
@@ -349,7 +355,7 @@ app.get('/devices/:id', (req, res) => {
     res.json(devices[id]);
 });
 
-app.post('/devices/:id/alarm', (req, res) => {
+app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], (req, res) => {
     const id = req.params.id.toLowerCase();
     const active = req.query.active === 'true';
     if (!devices[id]) return res.sendStatus(404);
@@ -361,7 +367,7 @@ app.post('/devices/:id/alarm', (req, res) => {
 });
 
 // 🔥 NEU: WATCH LOGIK
-app.post('/devices/:id/watch', (req, res) => {
+app.post(['/devices/:id/watch', '/v1/devices/:id/watch'], (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId;
     const watcherName = req.query.watcherName || "Jemand";
@@ -388,7 +394,7 @@ app.post('/devices/:id/watch', (req, res) => {
     res.sendStatus(200);
 });
 
-app.post('/devices/:id/unwatch', (req, res) => {
+app.post(['/devices/:id/unwatch', '/v1/devices/:id/unwatch'], (req, res) => {
     const id = req.params.id.toLowerCase();
     if (!devices[id]) return res.sendStatus(404);
 
@@ -404,7 +410,7 @@ app.post('/devices/:id/unwatch', (req, res) => {
     res.sendStatus(200);
 });
 
-app.post('/devices/:id/wakeup', (req, res) => {
+app.post(['/devices/:id/wakeup', '/v1/devices/:id/wakeup'], (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherName = req.query.watcherName || "Zentrale";
     if (!devices[id]) return res.sendStatus(404);
@@ -419,9 +425,9 @@ app.post('/devices/:id/wakeup', (req, res) => {
     res.sendStatus(200);
 });
 
-app.get('/geofences', (req, res) => res.json(geofences));
+app.get(['/geofences', '/v1/geofences'], (req, res) => res.json(geofences));
 
-app.post('/geofences', async (req, res) => {
+app.post(['/geofences', '/v1/geofences'], async (req, res) => {
     const gf = req.body;
     if (!gf.id) return res.sendStatus(400);
     // Ersetzen oder Hinzufügen
@@ -431,10 +437,41 @@ app.post('/geofences', async (req, res) => {
     res.sendStatus(200);
 });
 
-app.delete('/geofences/:id', async (req, res) => {
+app.put(['/geofences/:id', '/v1/geofences/:id'], async (req, res) => {
+    const id = req.params.id;
+    const gf = req.body;
+    if (!gf.id) gf.id = id;
+    geofences = geofences.filter(item => item.id !== id);
+    geofences.push(gf);
+    await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    res.sendStatus(200);
+});
+
+app.delete(['/geofences/:id', '/v1/geofences/:id'], async (req, res) => {
     const id = req.params.id;
     geofences = geofences.filter(item => item.id !== id);
     await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    res.sendStatus(200);
+});
+
+app.post(['/location/clear/:id', '/v1/location/clear/:id'], (req, res) => {
+    // In dieser Minimal-Version löschen wir einfach das Gerät aus dem Speicher
+    const id = req.params.id.toLowerCase();
+    delete devices[id];
+    saveDevicesSafe();
+    res.sendStatus(200);
+});
+
+app.post(['/devices/wakeup-all', '/v1/devices/wakeup-all'], (req, res) => {
+    Object.values(devices).forEach(d => {
+        if (d.fcmToken) {
+            admin.messaging().send({
+                data: { type: 'wakeup', watcherName: "Zentrale (Broadcast)" },
+                token: d.fcmToken,
+                android: { priority: 'high' }
+            }).catch(() => {});
+        }
+    });
     res.sendStatus(200);
 });
 
