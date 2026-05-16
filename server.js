@@ -103,6 +103,17 @@ function mapProtoToApp(data) {
     if (!data) return data;
     const mapped = { ...data };
 
+    // Falls die Daten in der neuen 'core' Struktur kommen, flachklopfen
+    if (data.core) {
+        Object.assign(mapped, data.core);
+        delete mapped.core;
+    }
+    // Falls die Daten in der neuen 'state' Struktur kommen, flachklopfen
+    if (data.state) {
+        Object.assign(mapped, data.state);
+        delete mapped.state;
+    }
+
     // ProtoJS ordnet snake_case Felder automatisch camelCase zu (visual_lat -> visualLat)
     // Wir muessen hier sicherstellen, dass wir die Felder finden, falls defaults:false aktiv war.
 
