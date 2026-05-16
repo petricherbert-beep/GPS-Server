@@ -11,12 +11,12 @@ message LocationUpdateProto {
   string name = 3;
   double lat = 4;
   double lon = 5;
-  int32 battery = 6;
-  float temperature = 7;
-  float speed = 8;
-  float bearing = 9;
+  optional int32 battery = 6;
+  optional float temperature = 7;
+  optional float speed = 8;
+  optional float bearing = 9;
   int64 timestamp = 10;
-  float accuracy = 11;
+  optional float accuracy = 11;
   bool alarm_active = 12;
   bool is_awake = 13;
   bool is_watched = 14;
@@ -26,12 +26,12 @@ message LocationUpdateProto {
   bool is_motion = 18;
   bool is_wifi = 19;
   bool accident = 20;
-  int32 proximity_distance = 21;
-  bool proximity_enabled = 22;
-  double snapped_lat = 23;
-  double snapped_lon = 24;
-  double visual_lat = 25;
-  double visual_lon = 26;
+  optional int32 proximity_distance = 21;
+  optional bool proximity_enabled = 22;
+  optional double snapped_lat = 23;
+  optional double snapped_lon = 24;
+  optional double visual_lat = 25;
+  optional double visual_lon = 26;
   string motion_state = 27;
 }
 
@@ -43,12 +43,12 @@ message DeviceLocationProto {
   string device_id = 1;
   double lat = 2;
   double lon = 3;
-  int32 battery = 4;
-  float temperature = 5;
-  float speed = 6;
-  float bearing = 7;
+  optional int32 battery = 4;
+  optional float temperature = 5;
+  optional float speed = 6;
+  optional float bearing = 7;
   int64 timestamp = 8;
-  float accuracy = 9;
+  optional float accuracy = 9;
   bool offline = 10;
   string name = 11;
   string status = 12;
@@ -61,10 +61,10 @@ message DeviceLocationProto {
   bool is_motion = 19;
   bool is_wifi = 20;
   bool accident = 21;
-  double snapped_lat = 22;
-  double snapped_lon = 23;
-  double visual_lat = 26;
-  double visual_lon = 27;
+  optional double snapped_lat = 22;
+  optional double snapped_lon = 23;
+  optional double visual_lat = 26;
+  optional double visual_lon = 27;
   string geofence_event = 24;
   string motion_state = 25;
 }
