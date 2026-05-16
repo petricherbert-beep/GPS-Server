@@ -18,6 +18,8 @@ if (!process.env.API_KEY) {
 }
 const API_KEY = process.env.API_KEY;
 const PORT = process.env.PORT || 3000;
+// Render unterstützt standardmäßig nur einen öffentlichen Port.
+// Wir lassen gRPC auf einem internen Port laufen oder nutzen den gleichen, falls ein Proxy davor sitzt.
 const GRPC_PORT = process.env.GRPC_PORT || 50051;
 const DATA_FILE = './devices.json';
 const GEOFENCE_FILE = './geofences.json';
@@ -594,6 +596,11 @@ app.post(['/devices/wakeup-all', '/v1/devices/wakeup-all'], (req, res) => {
 server.listen(PORT, () => console.log(`🚀 GPS Server online on Port ${PORT}`));
 
 grpcServer.bindAsync(`0.0.0.0:${GRPC_PORT}`, grpc.ServerCredentials.createInsecure(), (err, port) => {
-    if (err) return console.error("❌ gRPC Bind Error:", err);
-    console.log(`📡 gRPC Server online on Port ${port}`);
+    if (err) {
+        console.error("❌ gRPC Bind Error:", err);
+        // Falls der gRPC Port belegt ist oder auf Render Probleme macht,
+        // stürzen wir nicht ab, damit Express weiterläuft.
+    } else {
+        console.log(`📡 gRPC Server online on Port ${port}`);
+    }
 });
