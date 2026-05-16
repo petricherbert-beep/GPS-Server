@@ -393,7 +393,13 @@ async function handleEvents(id, data, old) {
         const key = `gf:${id}:${data.geofenceEvent}`;
         if (!lastPushTimes[key] || (now - lastPushTimes[key] > 600000)) {
             lastPushTimes[key] = now;
-            await broadcast(id, { type: 'geofence_event', zoneName: data.geofenceEvent.split(':')[1] || 'Zone', deviceName: device.name || id, action: data.geofenceEvent.startsWith('enter') ? 'betreten' : 'verlassen' });
+            await broadcast(id, {
+                type: 'geofence_event',
+                deviceId: id, // 🔥 FIX: DeviceId für Filterung im Client
+                zoneName: data.geofenceEvent.split(':')[1] || 'Zone',
+                deviceName: device.name || id,
+                action: data.geofenceEvent.startsWith('enter') ? 'betreten' : 'verlassen'
+            });
         }
     }
 
@@ -402,7 +408,12 @@ async function handleEvents(id, data, old) {
         if (!lastPushTimes[key] || (now - lastPushTimes[key] > 300000)) {
             lastPushTimes[key] = now;
             console.log(`🚨 ACCIDENT BROADCAST for ${id}`);
-            await broadcast(id, { type: 'accident_alert', deviceName: device.name || id, user: device.name || id });
+            await broadcast(id, {
+                type: 'accident_alert',
+                deviceId: id,
+                deviceName: device.name || id,
+                user: device.name || id
+            });
         }
     }
 
@@ -411,7 +422,12 @@ async function handleEvents(id, data, old) {
         if (!lastPushTimes[key] || (now - lastPushTimes[key] > 300000)) {
             lastPushTimes[key] = now;
             console.log(`🔊 ALARM BROADCAST for ${id}`);
-            await broadcast(id, { type: 'alarm', message: `${device.name || id} braucht Hilfe!`, deviceName: device.name || id });
+            await broadcast(id, {
+                type: 'alarm',
+                deviceId: id,
+                message: `${device.name || id} braucht Hilfe!`,
+                deviceName: device.name || id
+            });
         }
     }
 }
