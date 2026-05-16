@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package tracking;
 
-import "google/protobuf/wrappers.proto";
-
 // --- ENUMS ---
 
 enum MotionState {
@@ -27,11 +25,11 @@ message LocationCore {
   double lat = 1;
   double lon = 2;
   int64 timestamp = 3;
-  google.protobuf.FloatValue speed = 4;
-  google.protobuf.FloatValue bearing = 5;
-  google.protobuf.FloatValue accuracy = 6;
-  google.protobuf.Int32Value battery = 7;
-  google.protobuf.FloatValue temperature = 8;
+  optional float speed = 4;
+  optional float bearing = 5;
+  optional float accuracy = 6;
+  optional int32 battery = 7;
+  optional float temperature = 8;
   MotionState motion_state = 9;
 }
 
@@ -65,14 +63,14 @@ message LocationUpdateProto {
   GeofenceTransition geofence_event = 7;
   string geofence_name = 8;
 
-  google.protobuf.Int32Value proximity_distance = 10;
-  google.protobuf.BoolValue proximity_enabled = 11;
+  optional int32 proximity_distance = 10;
+  optional bool proximity_enabled = 11;
 
   // Snap/Visual geometry
-  google.protobuf.DoubleValue snapped_lat = 12;
-  google.protobuf.DoubleValue snapped_lon = 13;
-  google.protobuf.DoubleValue visual_lat = 14;
-  google.protobuf.DoubleValue visual_lon = 15;
+  optional double snapped_lat = 12;
+  optional double snapped_lon = 13;
+  optional double visual_lat = 14;
+  optional double visual_lon = 15;
 
   EncryptedPayload encrypted_payload = 20;
 }
@@ -95,10 +93,10 @@ message DeviceLocationProto {
   GeofenceTransition geofence_event = 10;
   string geofence_name = 11;
 
-  google.protobuf.DoubleValue snapped_lat = 12;
-  google.protobuf.DoubleValue snapped_lon = 13;
-  google.protobuf.DoubleValue visual_lat = 14;
-  google.protobuf.DoubleValue visual_lon = 15;
+  optional double snapped_lat = 12;
+  optional double snapped_lon = 13;
+  optional double visual_lat = 14;
+  optional double visual_lon = 15;
 
   EncryptedPayload encrypted_payload = 20;
 }
