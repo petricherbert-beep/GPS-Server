@@ -25,11 +25,11 @@ message LocationCore {
   double lat = 1;
   double lon = 2;
   int64 timestamp = 3;
-  optional float speed = 4;
-  optional float bearing = 5;
-  optional float accuracy = 6;
-  optional int32 battery = 7;
-  optional float temperature = 8;
+  float speed = 4;
+  float bearing = 5;
+  float accuracy = 6;
+  int32 battery = 7;
+  float temperature = 8;
   MotionState motion_state = 9;
 }
 
@@ -63,14 +63,13 @@ message LocationUpdateProto {
   GeofenceTransition geofence_event = 7;
   string geofence_name = 8;
 
-  optional int32 proximity_distance = 10;
-  optional bool proximity_enabled = 11;
+  int32 proximity_distance = 10;
+  bool proximity_enabled = 11;
 
-  // Snap/Visual geometry
-  optional double snapped_lat = 12;
-  optional double snapped_lon = 13;
-  optional double visual_lat = 14;
-  optional double visual_lon = 15;
+  double snapped_lat = 12;
+  double snapped_lon = 13;
+  double visual_lat = 14;
+  double visual_lon = 15;
 
   EncryptedPayload encrypted_payload = 20;
 }
@@ -93,10 +92,10 @@ message DeviceLocationProto {
   GeofenceTransition geofence_event = 10;
   string geofence_name = 11;
 
-  optional double snapped_lat = 12;
-  optional double snapped_lon = 13;
-  optional double visual_lat = 14;
-  optional double visual_lon = 15;
+  double snapped_lat = 12;
+  double snapped_lon = 13;
+  double visual_lat = 14;
+  double visual_lon = 15;
 
   EncryptedPayload encrypted_payload = 20;
 }
