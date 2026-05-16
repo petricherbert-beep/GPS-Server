@@ -9,7 +9,11 @@ import protobuf from 'protobufjs';
 import grpc from '@grpc/grpc-js';
 import protoLoader from '@grpc/proto-loader';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import rateLimit from 'express-rate-limit';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // --- STRENGE KONFIGURATION ---
 if (!process.env.API_KEY) {
@@ -21,11 +25,11 @@ const PORT = process.env.PORT || 3000;
 // Render unterstützt standardmäßig nur einen öffentlichen Port.
 // Wir lassen gRPC auf einem internen Port laufen oder nutzen den gleichen, falls ein Proxy davor sitzt.
 const GRPC_PORT = process.env.GRPC_PORT || 50051;
-const DATA_FILE = './devices.json';
-const GEOFENCE_FILE = './geofences.json';
+const DATA_FILE = path.join(__dirname, 'devices.json');
+const GEOFENCE_FILE = path.join(__dirname, 'geofences.json');
 
 // --- PROTOBUF DEFINITION ---
-const PROTO_PATH = './tracking.proto';
+const PROTO_PATH = path.join(__dirname, 'tracking.proto');
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
     keepCase: true,
     longs: String,
@@ -103,7 +107,7 @@ function mapProtoToApp(data) {
 async function initFirebase() {
     try {
         const envKey = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.firebase_service_account;
-        const serviceAccount = envKey ? JSON.parse(envKey) : JSON.parse(await fs.readFile('./firebase-key.json', 'utf8'));
+        const serviceAccount = envKey ? JSON.parse(envKey) : JSON.parse(await fs.readFile(path.join(__dirname, 'firebase-key.json'), 'utf8'));
         admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
         console.log("✅ Firebase Admin aktiv.");
     } catch (e) {
