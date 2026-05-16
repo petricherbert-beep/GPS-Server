@@ -57,6 +57,10 @@ function pushUpdateToAll(device) {
     io.to(device.deviceId).emit('location_update', device);
 
     // 2. gRPC Streams
+    const response = {
+        device: device
+    };
+
     for (const call of grpcStreams) {
         try {
             // FIX: Reliable Backpressure & Memory Protection
@@ -65,7 +69,7 @@ function pushUpdateToAll(device) {
                 continue;
             }
 
-            const ok = call.write(device);
+            const ok = call.write(response);
             if (!ok) {
                 call._pendingWrites = (call._pendingWrites || 0) + 1;
                 if (call._pendingWrites > 100) {
@@ -78,6 +82,17 @@ function pushUpdateToAll(device) {
             }
         } catch (e) {
             console.error("gRPC Write Error:", e);
+            grpcStreams.delete(call);
+        }
+    }
+}
+
+function broadcastGeofenceReload() {
+    const response = { reload_geofences: true };
+    for (const call of grpcStreams) {
+        try {
+            if (call.writable !== false) call.write(response);
+        } catch (e) {
             grpcStreams.delete(call);
         }
     }
@@ -107,7 +122,10 @@ function mapProtoToApp(data) {
     mapped.geofenceEvent = data.geofenceEvent || data.geofence_event;
     mapped.motionState = data.motionState || data.motion_state;
 
-    // Optionale numerische Felder (Putz-Logik fuer 0, falls sie doch als 0 reinkommen)
+    // Akku-Mapping (Harmonisierung zwischen verschiedenen App-Versionen)
+    mapped.battery = data.battery !== undefined ? data.battery : (data.batteryPct !== undefined ? data.batteryPct : (data.battery_pct !== undefined ? data.battery_pct : undefined));
+
+    // Optionale numerische Felder
     // Aber durch 'optional' im Schema kommen sie nun meist als undefined, wenn sie fehlen.
     mapped.snappedLat = data.snappedLat || data.snapped_lat;
     mapped.snappedLon = data.snappedLon || data.snapped_lon;
@@ -135,6 +153,7 @@ async function initFirebase() {
 initFirebase();
 
 const app = express();
+app.set('trust proxy', 1); // 🔥 FIX: Erlaubt express-rate-limit IP-Erkennung hinter Render-Proxy
 app.use(cors({ origin: "*" }));
 
 // --- 🛡️ RATE LIMITING ---
@@ -185,7 +204,8 @@ grpcServer.addService(trackingProto.TrackingService.service, {
                 const wasCritical = data.alarmActive || data.accident;
                 updateDevice(id, data);
                 saveDevicesSafe({ immediate: wasCritical });
-                pushUpdateToAll(devices[id]);
+                const updated = devices[id];
+                if (updated) pushUpdateToAll(updated);
             }
         });
 
@@ -353,12 +373,17 @@ function updateDevice(id, data) {
     }
 
     // WHITELIST MERGE (Sicherheit gegen Pollution)
+    if (data.battery !== undefined && data.battery !== old.battery) {
+        console.log(`🔋 Battery Update for ${id}: ${old.battery}% -> ${data.battery}%`);
+    }
+
     const sanitized = {
         deviceId: id,
         name: data.name || old.name,
         lat: data.lat ?? old.lat,
         lon: data.lon ?? old.lon,
         battery: data.battery ?? old.battery,
+        batteryPct: data.battery ?? old.battery, // 🔥 Erhöht App-Kompatibilität
         speed: data.speed ?? old.speed,
         bearing: data.bearing ?? old.bearing,
         timestamp: data.timestamp ?? Date.now(),
@@ -495,7 +520,8 @@ app.post(['/location', '/v1/location'], async (req, res) => {
     if (!id) return res.sendStatus(400);
     updateDevice(id, data);
     saveDevicesSafe();
-    pushUpdateToAll(devices[id]);
+    const updated = devices[id];
+    if (updated) pushUpdateToAll(updated);
     res.sendStatus(200);
 });
 
@@ -520,7 +546,8 @@ app.post(['/location/update-batch', '/v1/location/batch'], async (req, res) => {
     saveDevicesSafe();
     if (batch.length > 0 && batch[0].deviceId) {
         const firstId = batch[0].deviceId.toLowerCase();
-        pushUpdateToAll(devices[firstId]);
+        const updated = devices[firstId];
+        if (updated) pushUpdateToAll(updated);
     }
     res.sendStatus(200);
 });
@@ -553,8 +580,9 @@ app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], (req, res) => {
     const active = req.query.active === 'true';
     if (!devices[id]) return res.sendStatus(404);
     devices[id].alarmActive = active;
-    saveDevicesSafe();
-    pushUpdateToAll(devices[id]);
+    saveDevicesSafe({ immediate: true });
+    const updated = devices[id];
+    if (updated) pushUpdateToAll(updated);
     io.to(id).emit('command', { deviceId: id, action: active ? 'START_ALARM' : 'STOP_ALARM' });
     res.sendStatus(200);
 });
@@ -624,6 +652,7 @@ app.post(['/geofences', '/v1/geofences'], async (req, res) => {
     geofences = geofences.filter(item => item.id !== gf.id);
     geofences.push(gf);
     await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    broadcastGeofenceReload();
     res.sendStatus(200);
 });
 
@@ -634,6 +663,7 @@ app.put(['/geofences/:id', '/v1/geofences/:id'], async (req, res) => {
     geofences = geofences.filter(item => item.id !== id);
     geofences.push(gf);
     await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    broadcastGeofenceReload();
     res.sendStatus(200);
 });
 
@@ -641,6 +671,7 @@ app.delete(['/geofences/:id', '/v1/geofences/:id'], async (req, res) => {
     const id = req.params.id;
     geofences = geofences.filter(item => item.id !== id);
     await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    broadcastGeofenceReload();
     res.sendStatus(200);
 });
 
