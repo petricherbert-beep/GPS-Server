@@ -1,38 +1,80 @@
 syntax = "proto3";
 
-option java_package = "com.example.gpstrackingapp.proto";
-option java_multiple_files = true;
-
 package tracking;
+
+import "google/protobuf/wrappers.proto";
+
+// --- ENUMS ---
+
+enum MotionState {
+  MOTION_UNKNOWN = 0;
+  STILL = 1;
+  WALKING = 2;
+  CYCLING = 3;
+  DRIVING = 4;
+  HIGHWAY = 5;
+}
+
+enum GeofenceTransition {
+  GEOFENCE_NONE = 0;
+  ENTER = 1;
+  EXIT = 2;
+}
+
+// --- SHARED COMPONENTS ---
+
+message LocationCore {
+  double lat = 1;
+  double lon = 2;
+  int64 timestamp = 3;
+  google.protobuf.FloatValue speed = 4;
+  google.protobuf.FloatValue bearing = 5;
+  google.protobuf.FloatValue accuracy = 6;
+  google.protobuf.Int32Value battery = 7;
+  google.protobuf.FloatValue temperature = 8;
+  MotionState motion_state = 9;
+}
+
+message DeviceState {
+  bool alarm_active = 1;
+  bool is_awake = 2;
+  bool is_watched = 3;
+  bool is_locked = 4;
+  bool is_motion = 5;
+  bool is_wifi = 6;
+  bool accident = 7;
+}
+
+message EncryptedPayload {
+  int32 version = 1;
+  bytes iv = 2;
+  bytes ciphertext = 3;
+  string algorithm = 4;
+}
+
+// --- MESSAGES ---
 
 message LocationUpdateProto {
   string point_id = 1;
   string device_id = 2;
   string name = 3;
-  double lat = 4;
-  double lon = 5;
-  optional int32 battery = 6;
-  optional float temperature = 7;
-  optional float speed = 8;
-  optional float bearing = 9;
-  int64 timestamp = 10;
-  optional float accuracy = 11;
-  bool alarm_active = 12;
-  bool is_awake = 13;
-  bool is_watched = 14;
-  string fcm_token = 15;
-  string geofence_event = 16;
-  bool is_locked = 17;
-  bool is_motion = 18;
-  bool is_wifi = 19;
-  bool accident = 20;
-  optional int32 proximity_distance = 21;
-  optional bool proximity_enabled = 22;
-  optional double snapped_lat = 23;
-  optional double snapped_lon = 24;
-  optional double visual_lat = 25;
-  optional double visual_lon = 26;
-  string motion_state = 27;
+  LocationCore core = 4;
+  DeviceState state = 5;
+  string fcm_token = 6;
+
+  GeofenceTransition geofence_event = 7;
+  string geofence_name = 8;
+
+  google.protobuf.Int32Value proximity_distance = 10;
+  google.protobuf.BoolValue proximity_enabled = 11;
+
+  // Snap/Visual geometry
+  google.protobuf.DoubleValue snapped_lat = 12;
+  google.protobuf.DoubleValue snapped_lon = 13;
+  google.protobuf.DoubleValue visual_lat = 14;
+  google.protobuf.DoubleValue visual_lon = 15;
+
+  EncryptedPayload encrypted_payload = 20;
 }
 
 message LocationBatchProto {
@@ -41,53 +83,64 @@ message LocationBatchProto {
 
 message DeviceLocationProto {
   string device_id = 1;
-  double lat = 2;
-  double lon = 3;
-  optional int32 battery = 4;
-  optional float temperature = 5;
-  optional float speed = 6;
-  optional float bearing = 7;
-  int64 timestamp = 8;
-  optional float accuracy = 9;
-  bool offline = 10;
-  string name = 11;
-  string status = 12;
-  bool alarm_active = 13;
-  bool is_awake = 14;
-  bool is_watched = 15;
-  string watcher_name = 16;
-  string fcm_token = 17;
-  bool is_locked = 18;
-  bool is_motion = 19;
-  bool is_wifi = 20;
-  bool accident = 21;
-  optional double snapped_lat = 22;
-  optional double snapped_lon = 23;
-  optional double visual_lat = 26;
-  optional double visual_lon = 27;
-  string geofence_event = 24;
-  string motion_state = 25;
+  string name = 2;
+  LocationCore core = 3;
+  DeviceState state = 4;
+
+  bool offline = 5;
+  string status_msg = 6;
+  string watcher_name = 7;
+  string fcm_token = 8;
+
+  GeofenceTransition geofence_event = 10;
+  string geofence_name = 11;
+
+  google.protobuf.DoubleValue snapped_lat = 12;
+  google.protobuf.DoubleValue snapped_lon = 13;
+  google.protobuf.DoubleValue visual_lat = 14;
+  google.protobuf.DoubleValue visual_lon = 15;
+
+  EncryptedPayload encrypted_payload = 20;
 }
 
 message DeviceListProto {
   repeated DeviceLocationProto devices = 1;
+  string next_page_token = 2;
 }
 
 message DeviceListRequest {
   string api_key = 1;
-}
-
-service TrackingService {
-  // Bidirektionaler Stream: Sende eigene Position, empfange Updates oder Signale
-  rpc TrackLocation(stream LocationUpdateProto) returns (stream TrackingResponse);
-
-  // Initialer Abruf der Geräteliste
-  rpc GetDevices(DeviceListRequest) returns (DeviceListProto);
+  int32 page_size = 2;
+  string page_token = 3;
 }
 
 message TrackingResponse {
   oneof update {
     DeviceLocationProto device = 1;
     bool reload_geofences = 2;
+    string server_command = 3;
   }
+}
+
+// --- ENVELOPE FOR STREAMING ---
+
+message TrackingEvent {
+  string device_id = 1;
+  int64 timestamp = 2;
+
+  oneof payload {
+    LocationUpdateProto location_update = 3;
+    TrackingResponse server_response = 4;
+    string heartbeat = 5;
+  }
+}
+
+// --- SERVICE ---
+
+service TrackingService {
+  // Bidirektionaler Event-Stream
+  rpc TrackLocation(stream TrackingEvent) returns (stream TrackingEvent);
+
+  // Initialer Abruf der Geräteliste
+  rpc GetDevices(DeviceListRequest) returns (DeviceListProto);
 }
