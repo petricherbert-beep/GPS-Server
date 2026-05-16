@@ -1,5 +1,8 @@
 syntax = "proto3";
 
+option java_package = "com.example.gpstrackingapp.proto";
+option java_multiple_files = true;
+
 package tracking;
 
 message LocationUpdateProto {
@@ -30,7 +33,6 @@ message LocationUpdateProto {
   optional double visual_lat = 25;
   optional double visual_lon = 26;
   string motion_state = 27;
-  bytes encrypted_data = 30;
 }
 
 message LocationBatchProto {
@@ -65,7 +67,6 @@ message DeviceLocationProto {
   optional double visual_lon = 27;
   string geofence_event = 24;
   string motion_state = 25;
-  bytes encrypted_data = 30;
 }
 
 message DeviceListProto {
@@ -77,9 +78,16 @@ message DeviceListRequest {
 }
 
 service TrackingService {
-  // Bidirektionaler Stream: Sende eigene Position, empfange Updates von anderen
-  rpc TrackLocation(stream LocationUpdateProto) returns (stream DeviceLocationProto);
+  // Bidirektionaler Stream: Sende eigene Position, empfange Updates oder Signale
+  rpc TrackLocation(stream LocationUpdateProto) returns (stream TrackingResponse);
 
   // Initialer Abruf der Geräteliste
   rpc GetDevices(DeviceListRequest) returns (DeviceListProto);
+}
+
+message TrackingResponse {
+  oneof update {
+    DeviceLocationProto device = 1;
+    bool reload_geofences = 2;
+  }
 }
