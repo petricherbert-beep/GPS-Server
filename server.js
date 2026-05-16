@@ -257,12 +257,14 @@ function updateDevice(id, data) {
 
     let alarmActive = data.alarmActive;
     if (old.alarmActive === true && data.alarmActive === false) {
-        if (Date.now() - (old.lastSeen || 0) < 30000) alarmActive = true;
+        // 🔥 FIX: Nur wenn das letzte Update SEHR ALT war (> 30s),
+        // koennte es ein "stale" Punkt sein, der einen neuen Alarm loescht.
+        if (Date.now() - (old.lastSeen || 0) > 30000) alarmActive = true;
     }
 
     let accident = data.accident;
     if (old.accident === true && data.accident === false) {
-        if (Date.now() - (old.lastSeen || 0) < 30000) accident = true;
+        if (Date.now() - (old.lastSeen || 0) > 30000) accident = true;
     }
 
     devices[id] = {
