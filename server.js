@@ -32,7 +32,7 @@ const GEOFENCE_FILE = path.join(__dirname, 'geofences.json');
 const PROTO_PATH = path.join(__dirname, 'tracking.proto');
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
     keepCase: true,
-    longs: String,
+    longs: Number, // FIX: Konsistent Number für alle
     enums: String,
     defaults: false, // FIX: Konsistent keine Defaults (erleichtert Null-Handling)
     oneofs: true
@@ -51,14 +51,31 @@ const DeviceListProto = root.lookupType("DeviceListProto");
 const grpcStreams = new Set();
 
 function pushUpdateToAll(device) {
+    if (!device || !device.deviceId) return;
+
     // 1. Socket.IO
     io.to(device.deviceId).emit('location_update', device);
 
     // 2. gRPC Streams
     for (const call of grpcStreams) {
         try {
+            // FIX: Reliable Backpressure & Memory Protection
+            if (call.writable === false) {
+                grpcStreams.delete(call);
+                continue;
+            }
+
             const ok = call.write(device);
-            if (!ok) console.warn("gRPC Backpressure: Client lagging");
+            if (!ok) {
+                call._pendingWrites = (call._pendingWrites || 0) + 1;
+                if (call._pendingWrites > 100) {
+                    console.warn(`⚠️ gRPC Backpressure: Force closing slow client`);
+                    call.end();
+                    grpcStreams.delete(call);
+                }
+            } else {
+                call._pendingWrites = 0;
+            }
         } catch (e) {
             console.error("gRPC Write Error:", e);
             grpcStreams.delete(call);
@@ -121,12 +138,24 @@ const app = express();
 app.use(cors({ origin: "*" }));
 
 // --- 🛡️ RATE LIMITING ---
-const limiter = rateLimit({
-    windowMs: 60 * 1000, // 1 Minute
-    max: 500, // Max 500 Anfragen pro Minute pro IP
-    message: "Zu viele Anfragen vom Client. Bitte warten."
+const telemetryLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 500, // Hoher Durchsatz für GPS Punkte
+    message: "Zu viele Standort-Updates."
 });
-app.use(limiter);
+
+const adminLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60, // Strenger Schutz für Alarme/Zonen/Wakeups
+    message: "Administrative Limits erreicht."
+});
+
+app.use('/location', telemetryLimiter);
+app.use('/v1/location', telemetryLimiter);
+app.use('/devices', adminLimiter);
+app.use('/v1/devices', adminLimiter);
+app.use('/geofences', adminLimiter);
+app.use('/v1/geofences', adminLimiter);
 
 // --- gRPC SERVER IMPLEMENTATION ---
 const grpcServer = new grpc.Server();
@@ -138,6 +167,11 @@ grpcServer.addService(trackingProto.TrackingService.service, {
         callback(null, { devices: Object.values(devices) });
     },
     TrackLocation: (call) => {
+        if (grpcStreams.size >= 1000) {
+            console.warn("❌ gRPC Reject: Max connections reached");
+            return call.end();
+        }
+
         grpcStreams.add(call);
 
         function cleanup() {
@@ -148,8 +182,9 @@ grpcServer.addService(trackingProto.TrackingService.service, {
             const data = mapProtoToApp(update);
             const id = data.deviceId?.toLowerCase();
             if (id) {
+                const wasCritical = data.alarmActive || data.accident;
                 updateDevice(id, data);
-                saveDevicesSafe();
+                saveDevicesSafe({ immediate: wasCritical });
                 pushUpdateToAll(devices[id]);
             }
         });
@@ -221,10 +256,18 @@ async function atomicWrite(file, data) {
     await fs.rename(tmp, file);
 }
 
-function saveDevicesSafe() {
-    if (saveTimer) clearTimeout(saveTimer);
+function saveDevicesSafe(opts = { immediate: false }) {
+    if (opts.immediate) {
+        if (saveTimer) clearTimeout(saveTimer);
+        return atomicWrite(DATA_FILE, JSON.stringify(devices, null, 2))
+            .then(() => console.log(`🔥 Critical state flushed to disk.`))
+            .catch(e => console.error("Critical Save Error:", e));
+    }
+
+    if (saveTimer) return; // Bereits ein Debounce aktiv
 
     saveTimer = setTimeout(async () => {
+        saveTimer = null;
         try {
             await atomicWrite(DATA_FILE, JSON.stringify(devices, null, 2));
             console.log(`💾 Devices saved to disk.`);
@@ -380,37 +423,45 @@ async function broadcast(senderId, payload) {
 
     if (tokens.length === 0) return;
 
-    try {
-        const response = await admin.messaging().sendEachForMulticast({
-            data: payload,
-            tokens: tokens,
-            android: { priority: 'high' }
-        });
+    // FIX: Firebase Multicast Limit (500 tokens)
+    const tokenChunks = [];
+    for (let i = 0; i < tokens.length; i += 500) {
+        tokenChunks.push(tokens.slice(i, i + 500));
+    }
 
-        if (response.failureCount > 0) {
-            const failedTokens = [];
-            response.responses.forEach((resp, idx) => {
-                if (!resp.success) {
-                    const error = resp.error;
-                    if (error.code === 'messaging/registration-token-not-registered' ||
-                        error.code === 'messaging/invalid-registration-token') {
-                        failedTokens.push(tokens[idx]);
-                    }
-                }
+    for (const chunk of tokenChunks) {
+        try {
+            const response = await admin.messaging().sendEachForMulticast({
+                data: payload,
+                tokens: chunk,
+                android: { priority: 'high' }
             });
 
-            if (failedTokens.length > 0) {
-                console.log(`🧹 Cleaning up ${failedTokens.length} invalid FCM tokens...`);
-                Object.values(devices).forEach(d => {
-                    if (failedTokens.includes(d.fcmToken)) {
-                        delete d.fcmToken;
+            if (response.failureCount > 0) {
+                const failedTokens = [];
+                response.responses.forEach((resp, idx) => {
+                    if (!resp.success) {
+                        const error = resp.error;
+                        if (error.code === 'messaging/registration-token-not-registered' ||
+                            error.code === 'messaging/invalid-registration-token') {
+                            failedTokens.push(chunk[idx]);
+                        }
                     }
                 });
-                saveDevicesSafe();
+
+                if (failedTokens.length > 0) {
+                    console.log(`🧹 Cleaning up ${failedTokens.length} invalid FCM tokens...`);
+                    Object.values(devices).forEach(d => {
+                        if (failedTokens.includes(d.fcmToken)) {
+                            delete d.fcmToken;
+                        }
+                    });
+                    saveDevicesSafe();
+                }
             }
+        } catch (e) {
+            console.error("Multicast Error:", e);
         }
-    } catch (e) {
-        console.error("Multicast Error:", e);
     }
 }
 
