@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package tracking;
+
+message LocationUpdateProto {
+  string point_id = 1;
+  string device_id = 2;
+  string name = 3;
+  double lat = 4;
+  double lon = 5;
+  optional int32 battery = 6;
+  optional float temperature = 7;
+  optional float speed = 8;
+  optional float bearing = 9;
+  int64 timestamp = 10;
+  optional float accuracy = 11;
+  bool alarm_active = 12;
+  bool is_awake = 13;
+  bool is_watched = 14;
+  string fcm_token = 15;
+  string geofence_event = 16;
+  bool is_locked = 17;
+  bool is_motion = 18;
+  bool is_wifi = 19;
+  bool accident = 20;
+  optional int32 proximity_distance = 21;
+  optional bool proximity_enabled = 22;
+  optional double snapped_lat = 23;
+  optional double snapped_lon = 24;
+  optional double visual_lat = 25;
+  optional double visual_lon = 26;
+  string motion_state = 27;
+  bytes encrypted_data = 30;
+}
+
+message LocationBatchProto {
+  repeated LocationUpdateProto updates = 1;
+}
+
+message DeviceLocationProto {
+  string device_id = 1;
+  double lat = 2;
+  double lon = 3;
+  optional int32 battery = 4;
+  optional float temperature = 5;
+  optional float speed = 6;
+  optional float bearing = 7;
+  int64 timestamp = 8;
+  optional float accuracy = 9;
+  bool offline = 10;
+  string name = 11;
+  string status = 12;
+  bool alarm_active = 13;
+  bool is_awake = 14;
+  bool is_watched = 15;
+  string watcher_name = 16;
+  string fcm_token = 17;
+  bool is_locked = 18;
+  bool is_motion = 19;
+  bool is_wifi = 20;
+  bool accident = 21;
+  optional double snapped_lat = 22;
+  optional double snapped_lon = 23;
+  optional double visual_lat = 26;
+  optional double visual_lon = 27;
+  string geofence_event = 24;
+  string motion_state = 25;
+  bytes encrypted_data = 30;
+}
+
+message DeviceListProto {
+  repeated DeviceLocationProto devices = 1;
+}
+
+message DeviceListRequest {
+  string api_key = 1;
+}
+
+service TrackingService {
+  // Bidirektionaler Stream: Sende eigene Position, empfange Updates von anderen
+  rpc TrackLocation(stream LocationUpdateProto) returns (stream DeviceLocationProto);
+
+  // Initialer Abruf der Geräteliste
+  rpc GetDevices(DeviceListRequest) returns (DeviceListProto);
+}
