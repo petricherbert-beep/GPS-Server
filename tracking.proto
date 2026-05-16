@@ -1,77 +1,38 @@
 syntax = "proto3";
 
+option java_package = "com.example.gpstrackingapp.proto";
+option java_multiple_files = true;
+
 package tracking;
-
-// --- ENUMS ---
-
-enum MotionState {
-  MOTION_UNKNOWN = 0;
-  STILL = 1;
-  WALKING = 2;
-  CYCLING = 3;
-  DRIVING = 4;
-  HIGHWAY = 5;
-}
-
-enum GeofenceTransition {
-  GEOFENCE_NONE = 0;
-  ENTER = 1;
-  EXIT = 2;
-}
-
-// --- SHARED COMPONENTS ---
-
-message LocationCore {
-  double lat = 1;
-  double lon = 2;
-  int64 timestamp = 3;
-  float speed = 4;
-  float bearing = 5;
-  float accuracy = 6;
-  int32 battery = 7;
-  float temperature = 8;
-  MotionState motion_state = 9;
-}
-
-message DeviceState {
-  bool alarm_active = 1;
-  bool is_awake = 2;
-  bool is_watched = 3;
-  bool is_locked = 4;
-  bool is_motion = 5;
-  bool is_wifi = 6;
-  bool accident = 7;
-}
-
-message EncryptedPayload {
-  int32 version = 1;
-  bytes iv = 2;
-  bytes ciphertext = 3;
-  string algorithm = 4;
-}
-
-// --- MESSAGES ---
 
 message LocationUpdateProto {
   string point_id = 1;
   string device_id = 2;
   string name = 3;
-  LocationCore core = 4;
-  DeviceState state = 5;
-  string fcm_token = 6;
-
-  GeofenceTransition geofence_event = 7;
-  string geofence_name = 8;
-
-  int32 proximity_distance = 10;
-  bool proximity_enabled = 11;
-
-  double snapped_lat = 12;
-  double snapped_lon = 13;
-  double visual_lat = 14;
-  double visual_lon = 15;
-
-  EncryptedPayload encrypted_payload = 20;
+  double lat = 4;
+  double lon = 5;
+  int32 battery = 6;
+  float temperature = 7;
+  float speed = 8;
+  float bearing = 9;
+  int64 timestamp = 10;
+  float accuracy = 11;
+  bool alarm_active = 12;
+  bool is_awake = 13;
+  bool is_watched = 14;
+  string fcm_token = 15;
+  string geofence_event = 16;
+  bool is_locked = 17;
+  bool is_motion = 18;
+  bool is_wifi = 19;
+  bool accident = 20;
+  int32 proximity_distance = 21;
+  bool proximity_enabled = 22;
+  double snapped_lat = 23;
+  double snapped_lon = 24;
+  double visual_lat = 25;
+  double visual_lon = 26;
+  string motion_state = 27;
 }
 
 message LocationBatchProto {
@@ -80,64 +41,50 @@ message LocationBatchProto {
 
 message DeviceLocationProto {
   string device_id = 1;
-  string name = 2;
-  LocationCore core = 3;
-  DeviceState state = 4;
-
-  bool offline = 5;
-  string status_msg = 6;
-  string watcher_name = 7;
-  string fcm_token = 8;
-
-  GeofenceTransition geofence_event = 10;
-  string geofence_name = 11;
-
-  double snapped_lat = 12;
-  double snapped_lon = 13;
-  double visual_lat = 14;
-  double visual_lon = 15;
-
-  EncryptedPayload encrypted_payload = 20;
+  double lat = 2;
+  double lon = 3;
+  int32 battery = 4;
+  float temperature = 5;
+  float speed = 6;
+  float bearing = 7;
+  int64 timestamp = 8;
+  float accuracy = 9;
+  bool offline = 10;
+  string name = 11;
+  string status = 12;
+  bool alarm_active = 13;
+  bool is_awake = 14;
+  bool is_watched = 15;
+  string watcher_name = 16;
+  string fcm_token = 17;
+  bool is_locked = 18;
+  bool is_motion = 19;
+  bool is_wifi = 20;
+  bool accident = 21;
+  double snapped_lat = 22;
+  double snapped_lon = 23;
+  double visual_lat = 26;
+  double visual_lon = 27;
+  string geofence_event = 24;
+  string motion_state = 25;
 }
 
 message DeviceListProto {
   repeated DeviceLocationProto devices = 1;
-  string next_page_token = 2;
 }
 
 message DeviceListRequest {
   string api_key = 1;
-  int32 page_size = 2;
-  string page_token = 3;
+}
+
+service TrackingService {
+  rpc TrackLocation(stream LocationUpdateProto) returns (stream TrackingResponse);
+  rpc GetDevices(DeviceListRequest) returns (DeviceListProto);
 }
 
 message TrackingResponse {
   oneof update {
     DeviceLocationProto device = 1;
     bool reload_geofences = 2;
-    string server_command = 3;
   }
-}
-
-// --- ENVELOPE FOR STREAMING ---
-
-message TrackingEvent {
-  string device_id = 1;
-  int64 timestamp = 2;
-
-  oneof payload {
-    LocationUpdateProto location_update = 3;
-    TrackingResponse server_response = 4;
-    string heartbeat = 5;
-  }
-}
-
-// --- SERVICE ---
-
-service TrackingService {
-  // Bidirektionaler Event-Stream
-  rpc TrackLocation(stream TrackingEvent) returns (stream TrackingEvent);
-
-  // Initialer Abruf der Geräteliste
-  rpc GetDevices(DeviceListRequest) returns (DeviceListProto);
 }
