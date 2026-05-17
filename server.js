@@ -53,44 +53,25 @@ const grpcStreams = new Set();
 // Hilfsfunktion für Feld-Mapping (App camelCase -> Proto snake_case)
 function mapAppToProto(data) {
     if (!data) return data;
-
-    // 🔥 Akku-Wert sicherstellen: Wir probieren alle Varianten durch
-    const batteryValue = data.battery !== undefined ? data.battery :
-                        (data.batteryPct !== undefined ? data.batteryPct :
-                        (data.battery_pct !== undefined ? data.battery_pct : undefined));
-
-    const p = {
-        device_id: (data.deviceId || data.device_id || "").toLowerCase().trim(),
-        lat: data.lat || 0,
-        lon: data.lon || 0,
-        timestamp: data.timestamp ? (typeof data.timestamp === 'number' ? data.timestamp : Date.now()) : Date.now(),
-        name: data.name || "",
-        status: data.status || "online",
-        battery: batteryValue !== undefined ? batteryValue : 0,
-        speed: data.speed || 0,
-        bearing: data.bearing || 0,
-        accuracy: data.accuracy || 10,
-        alarm_active: !!data.alarmActive,
-        is_awake: data.isAwake !== undefined ? !!data.isAwake : true,
-        is_watched: !!data.isWatched,
-        is_locked: !!data.isLocked,
-        is_motion: !!data.isMotion,
-        is_wifi: !!data.isWifi,
-        accident: !!data.accident,
-        watcher_name: data.watcherName || "",
-        fcm_token: data.fcmToken || "",
-        snapped_lat: data.snappedLat || 0,
-        snapped_lon: data.snappedLon || 0,
-        visual_lat: data.visualLat || 0,
-        visual_lon: data.visualLon || 0,
-        geofence_event: data.geofenceEvent || "",
-        motion_state: data.motionState || "STILL",
-        offline: !!data.offline
-    };
-
-    // 🔥 KRITISCH: Wenn der Akku 0 ist, aber wir einen alten Wert haben, nutzen wir den alten.
-    if (p.battery === 0 && old.battery > 0) p.battery = old.battery;
-
+    const p = { ...data };
+    // Mappe alle bekannten Felder auf ihre Proto-Namen
+    if (data.deviceId) p.device_id = data.deviceId;
+    if (data.pointId) p.point_id = data.pointId;
+    if (data.alarmActive !== undefined) p.alarm_active = data.alarmActive;
+    if (data.isAwake !== undefined) p.is_awake = data.isAwake;
+    if (data.isWatched !== undefined) p.is_watched = data.isWatched;
+    if (data.isLocked !== undefined) p.is_locked = data.isLocked;
+    if (data.isMotion !== undefined) p.is_motion = data.isMotion;
+    if (data.isWifi !== undefined) p.is_wifi = data.isWifi;
+    if (data.fcmToken) p.fcm_token = data.fcmToken;
+    if (data.geofenceEvent) p.geofence_event = data.geofenceEvent;
+    if (data.motionState) p.motion_state = data.motionState;
+    if (data.batteryPct !== undefined) p.battery = data.batteryPct;
+    if (data.snappedLat) p.snapped_lat = data.snappedLat;
+    if (data.snappedLon) p.snapped_lon = data.snappedLon;
+    if (data.visualLat) p.visual_lat = data.visualLat;
+    if (data.visualLon) p.visual_lon = data.visualLon;
+    if (data.watcherName) p.watcher_name = data.watcherName;
     return p;
 }
 
@@ -375,15 +356,7 @@ async function init() {
             }
         }
     } catch (e) { devices = {}; }
-    try {
-        geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8'));
-        // 🔥 SANITIZATION: Namen korrigieren, falls leer
-        geofences.forEach(gf => {
-            if (!gf.name || gf.name.trim() === "") {
-                gf.name = "Zone " + (gf.id ? gf.id.substring(0, 4) : "X");
-            }
-        });
-    } catch (e) { geofences = []; }
+    try { geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8')); } catch (e) { geofences = []; }
 }
 init();
 
@@ -429,18 +402,6 @@ function updateDevice(id, data) {
     }
 
     const old = devices[id] || {};
-
-    // 🔥 V50: NAMENS-DEDUPLIZIERUNG (Schutz gegen Geister-Marker)
-    // Wenn ein neues Gerät einen Namen sendet, löschen wir alle anderen IDs mit diesem Namen.
-    if (data.name && data.name.length > 1) {
-        const newName = data.name.toLowerCase().trim();
-        for (const existingId in devices) {
-            if (existingId !== id && devices[existingId].name && devices[existingId].name.toLowerCase().trim() === newName) {
-                console.log(`🧹 Purging duplicate name entry: ${existingId} (Name: ${data.name})`);
-                delete devices[existingId];
-            }
-        }
-    }
 
     // 🔥 RACE CONDITION PROTECTION: Nur neuere Daten akzeptieren
     if (data.timestamp && old.timestamp && data.timestamp < old.timestamp) {
@@ -507,35 +468,18 @@ async function handleEvents(id, data, old) {
     const device = devices[id];
     if (!device) return;
 
-    const eventStr = data.geofenceEvent || "";
     const IGNORE_EVENTS = ["heartbeat", "token_refresh", "audit_check", "token_init", "token_update", "app_visible", "self_watch_active"];
-
-    if (eventStr && !IGNORE_EVENTS.includes(eventStr)) {
-        console.log(`📍 GEOFENCE EVENT for ${id}: ${eventStr}`);
-        const parts = eventStr.split(':');
-        const actionPrefix = parts[0];
-
-        // 🔥 Robustere Extraktion des Namens
-        let namePart = parts.length > 1 ? parts.slice(1).join(':').trim() : "";
-
-        if (!namePart || namePart === "Zone") {
-            // Versuche den Namen aus der globalen Geofence-Liste zu finden
-            const foundGf = geofences.find(g => eventStr.includes(g.id) || eventStr.includes(g.name));
-            namePart = foundGf ? foundGf.name : "Unbekannte Zone";
-        }
-
-        const key = `gf:${id}:${namePart}:${actionPrefix}`; // Key auf Name + Aktion basieren
-
-        // 🔥 SPAM-SCHUTZ: Max. ein Event alle 5 Minuten pro Zone/Aktion
-        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 300000)) {
+    if (data.geofenceEvent && !IGNORE_EVENTS.includes(data.geofenceEvent)) {
+        const key = `gf:${id}:${data.geofenceEvent}`;
+        // 🔥 Cooldown auf 60s reduziert für besseres Test-Feedback
+        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 60000)) {
             lastPushTimes[key] = now;
-            console.log(`📣 BROADCAST GEOFENCE: ${namePart} ${actionPrefix}`);
             await broadcast(id, {
                 type: 'geofence_event',
                 deviceId: id,
-                zoneName: namePart,
+                zoneName: data.geofenceEvent.split(':')[1] || 'Zone',
                 deviceName: device.name || id,
-                action: actionPrefix.startsWith('enter') ? 'betreten' : 'verlassen'
+                action: data.geofenceEvent.startsWith('enter') ? 'betreten' : 'verlassen'
             });
         }
     }
@@ -799,10 +743,6 @@ app.get(['/geofences', '/v1/geofences'], (req, res) => res.json(geofences));
 app.post(['/geofences', '/v1/geofences'], async (req, res) => {
     const gf = req.body;
     if (!gf.id) return res.sendStatus(400);
-    // 🔥 Sicherstellen, dass ein Name vorhanden ist
-    if (!gf.name || gf.name.trim() === "") {
-        gf.name = "Zone " + gf.id.substring(0, 4);
-    }
     geofences = geofences.filter(item => item.id !== gf.id);
     geofences.push(gf);
     await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
