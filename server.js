@@ -50,6 +50,31 @@ const DeviceListProto = root.lookupType("DeviceListProto");
 // --- gRPC STATE ---
 const grpcStreams = new Set();
 
+// Hilfsfunktion für Feld-Mapping (App camelCase -> Proto snake_case)
+function mapAppToProto(data) {
+    if (!data) return data;
+    const p = { ...data };
+    // Mappe alle bekannten Felder auf ihre Proto-Namen
+    if (data.deviceId) p.device_id = data.deviceId;
+    if (data.pointId) p.point_id = data.pointId;
+    if (data.alarmActive !== undefined) p.alarm_active = data.alarmActive;
+    if (data.isAwake !== undefined) p.is_awake = data.isAwake;
+    if (data.isWatched !== undefined) p.is_watched = data.isWatched;
+    if (data.isLocked !== undefined) p.is_locked = data.isLocked;
+    if (data.isMotion !== undefined) p.is_motion = data.isMotion;
+    if (data.isWifi !== undefined) p.is_wifi = data.isWifi;
+    if (data.fcmToken) p.fcm_token = data.fcmToken;
+    if (data.geofenceEvent) p.geofence_event = data.geofenceEvent;
+    if (data.motionState) p.motion_state = data.motionState;
+    if (data.batteryPct !== undefined) p.battery = data.batteryPct;
+    if (data.snappedLat) p.snapped_lat = data.snappedLat;
+    if (data.snappedLon) p.snapped_lon = data.snappedLon;
+    if (data.visualLat) p.visual_lat = data.visualLat;
+    if (data.visualLon) p.visual_lon = data.visualLon;
+    if (data.watcherName) p.watcher_name = data.watcherName;
+    return p;
+}
+
 function pushUpdateToAll(device) {
     if (!device || !device.deviceId) return;
 
@@ -57,12 +82,13 @@ function pushUpdateToAll(device) {
     io.to(device.deviceId).emit('location_update', device);
 
     // 2. gRPC Streams
-    // 🔥 WRAP: In TrackingEvent einpacken für den neuen gRPC Standard
+    // 🔥 WRAP & MAP: In TrackingEvent einpacken und Feldnamen korrigieren
+    const protoDevice = mapAppToProto(device);
     const response = {
         device_id: device.deviceId,
         timestamp: Date.now(),
         server_response: {
-            device: device
+            device: protoDevice
         }
     };
 
@@ -577,7 +603,8 @@ app.get(['/devices', '/v1/devices'], (req, res) => {
     const list = Object.values(devices);
     const accept = req.headers['accept'] || '';
     if (accept.includes('application/x-protobuf')) {
-        const buffer = DeviceListProto.encode(DeviceListProto.create({ devices: list })).finish();
+        const protoList = list.map(d => mapAppToProto(d));
+        const buffer = DeviceListProto.encode(DeviceListProto.create({ devices: protoList })).finish();
         res.setHeader('Content-Type', 'application/x-protobuf');
         return res.send(buffer);
     }
@@ -589,7 +616,7 @@ app.get(['/devices/:id', '/v1/devices/:id'], (req, res) => {
     if (!devices[id]) return res.sendStatus(404);
     const accept = req.headers['accept'] || '';
     if (accept.includes('application/x-protobuf')) {
-        const buffer = DeviceLocationProto.encode(DeviceLocationProto.create(devices[id])).finish();
+        const buffer = DeviceLocationProto.encode(DeviceLocationProto.create(mapAppToProto(devices[id]))).finish();
         res.setHeader('Content-Type', 'application/x-protobuf');
         return res.send(buffer);
     }
