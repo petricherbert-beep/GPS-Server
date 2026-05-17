@@ -483,17 +483,22 @@ async function handleEvents(id, data, old) {
         console.log(`📍 GEOFENCE EVENT for ${id}: ${eventStr}`);
         const parts = eventStr.split(':');
         const actionPrefix = parts[0];
-        // 🔥 Robustere Extraktion des Namens
-        let namePart = parts.slice(1).join(':').trim();
 
-        if (!namePart) {
-            namePart = 'Zone';
+        // 🔥 Robustere Extraktion des Namens
+        let namePart = parts.length > 1 ? parts.slice(1).join(':').trim() : "";
+
+        if (!namePart || namePart === "Zone") {
+            // Versuche den Namen aus der globalen Geofence-Liste zu finden
+            const foundGf = geofences.find(g => eventStr.includes(g.id) || eventStr.includes(g.name));
+            namePart = foundGf ? foundGf.name : "Unbekannte Zone";
         }
 
-        const key = `gf:${id}:${eventStr}`;
-        // 🔥 Cooldown auf 60s reduziert für besseres Test-Feedback
-        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 60000)) {
+        const key = `gf:${id}:${namePart}:${actionPrefix}`; // Key auf Name + Aktion basieren
+
+        // 🔥 SPAM-SCHUTZ: Max. ein Event alle 5 Minuten pro Zone/Aktion
+        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 300000)) {
             lastPushTimes[key] = now;
+            console.log(`📣 BROADCAST GEOFENCE: ${namePart} ${actionPrefix}`);
             await broadcast(id, {
                 type: 'geofence_event',
                 deviceId: id,
