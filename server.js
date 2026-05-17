@@ -53,15 +53,20 @@ const grpcStreams = new Set();
 // Hilfsfunktion für Feld-Mapping (App camelCase -> Proto snake_case)
 function mapAppToProto(data) {
     if (!data) return data;
-    // Erstelle ein frisches Objekt für das Proto-Format
+
+    // 🔥 Akku-Wert sicherstellen: Wir probieren alle Varianten durch
+    const batteryValue = data.battery !== undefined ? data.battery :
+                        (data.batteryPct !== undefined ? data.batteryPct :
+                        (data.battery_pct !== undefined ? data.battery_pct : 0));
+
     const p = {
-        device_id: data.deviceId,
+        device_id: data.deviceId || data.device_id,
         lat: data.lat || 0,
         lon: data.lon || 0,
         timestamp: data.timestamp ? (typeof data.timestamp === 'number' ? data.timestamp : Date.now()) : Date.now(),
         name: data.name || "",
         status: data.status || "online",
-        battery: data.battery !== undefined ? data.battery : (data.batteryPct !== undefined ? data.batteryPct : 0),
+        battery: batteryValue,
         speed: data.speed || 0,
         bearing: data.bearing || 0,
         accuracy: data.accuracy || 10,
