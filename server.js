@@ -57,7 +57,7 @@ function mapAppToProto(data) {
     // 🔥 Akku-Wert sicherstellen: Wir probieren alle Varianten durch
     const batteryValue = data.battery !== undefined ? data.battery :
                         (data.batteryPct !== undefined ? data.batteryPct :
-                        (data.battery_pct !== undefined ? data.battery_pct : 0));
+                        (data.battery_pct !== undefined ? data.battery_pct : undefined));
 
     const p = {
         device_id: data.deviceId || data.device_id,
@@ -66,7 +66,7 @@ function mapAppToProto(data) {
         timestamp: data.timestamp ? (typeof data.timestamp === 'number' ? data.timestamp : Date.now()) : Date.now(),
         name: data.name || "",
         status: data.status || "online",
-        battery: batteryValue,
+        battery: batteryValue !== undefined ? batteryValue : 0,
         speed: data.speed || 0,
         bearing: data.bearing || 0,
         accuracy: data.accuracy || 10,
