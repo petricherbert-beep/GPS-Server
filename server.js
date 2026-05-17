@@ -580,6 +580,8 @@ app.get(['/devices/:id', '/v1/devices/:id'], (req, res) => {
 app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], (req, res) => {
     const id = req.params.id.toLowerCase();
     const active = req.query.active === 'true';
+    const triggererId = (req.query.triggererId || "").toLowerCase(); // 🔥 NEU: Wer hat gedrückt?
+
     if (!devices[id]) return res.sendStatus(404);
 
     const old = { ...devices[id] };
@@ -589,10 +591,22 @@ app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], (req, res) => {
     const updated = devices[id];
     if (updated) {
         pushUpdateToAll(updated);
-        // 🔥 FIX 1: Broadcast an alle ANDEREN (Hilferuf-Meldung)
-        handleEvents(id, { alarmActive: active }, old);
 
-        // 🔥 FIX 2: Direkter Push an das ZIEL-GERÄT (damit der Ton auch im Hintergrund startet)
+        // Broadcast an alle Helfer (außer dem Absender und dem Ziel selbst)
+        const helpersPayload = {
+            type: 'alarm',
+            deviceId: id,
+            message: `${updated.name || id} braucht Hilfe!`,
+            deviceName: updated.name || id
+        };
+
+        Object.values(devices).forEach(d => {
+            if (d.fcmToken && d.deviceId !== id && d.deviceId !== triggererId) {
+                admin.messaging().send({ data: helpersPayload, token: d.fcmToken }).catch(() => {});
+            }
+        });
+
+        // Direkter Push an das ZIEL-GERÄT (Nicole)
         if (active && updated.fcmToken) {
             admin.messaging().send({
                 data: {
