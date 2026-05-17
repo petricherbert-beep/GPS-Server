@@ -60,7 +60,7 @@ function mapAppToProto(data) {
                         (data.battery_pct !== undefined ? data.battery_pct : undefined));
 
     const p = {
-        device_id: data.deviceId || data.device_id,
+        device_id: (data.deviceId || data.device_id || "").toLowerCase().trim(),
         lat: data.lat || 0,
         lon: data.lon || 0,
         timestamp: data.timestamp ? (typeof data.timestamp === 'number' ? data.timestamp : Date.now()) : Date.now(),
@@ -87,6 +87,10 @@ function mapAppToProto(data) {
         motion_state: data.motionState || "STILL",
         offline: !!data.offline
     };
+
+    // 🔥 KRITISCH: Wenn der Akku 0 ist, aber wir einen alten Wert haben, nutzen wir den alten.
+    if (p.battery === 0 && old.battery > 0) p.battery = old.battery;
+
     return p;
 }
 
@@ -425,6 +429,17 @@ function updateDevice(id, data) {
     }
 
     const old = devices[id] || {};
+
+    // 🔥 V50: NAMENS-DEDUPLIZIERUNG (Schutz gegen Geister-Marker)
+    // Wenn ein neues Gerät einen Namen sendet, löschen wir alle anderen IDs mit diesem Namen.
+    if (data.name && data.name.length > 1) {
+        for (const existingId in devices) {
+            if (existingId !== id && devices[existingId].name === data.name) {
+                console.log(`🧹 Purging duplicate name entry: ${existingId} (Name: ${data.name})`);
+                delete devices[existingId];
+            }
+        }
+    }
 
     // 🔥 RACE CONDITION PROTECTION: Nur neuere Daten akzeptieren
     if (data.timestamp && old.timestamp && data.timestamp < old.timestamp) {
