@@ -236,6 +236,16 @@ grpcServer.addService(trackingProto.TrackingService.service, {
             const data = mapProtoToApp(update);
             const id = data.deviceId?.toLowerCase();
             if (id) {
+                // 🔥 DUPLIKATS-SCHUTZ: Alte Streams für dieses Gerät finden und schließen
+                for (const oldCall of grpcStreams) {
+                    if (oldCall !== call && oldCall.deviceId === id) {
+                        console.log(`🧹 Closing duplicate gRPC stream for: ${id}`);
+                        oldCall.end();
+                        grpcStreams.delete(oldCall);
+                    }
+                }
+                call.deviceId = id; // ID am Call speichern
+
                 const wasCritical = data.alarmActive || data.accident;
                 updateDevice(id, data);
                 saveDevicesSafe({ immediate: wasCritical });
