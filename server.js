@@ -53,25 +53,35 @@ const grpcStreams = new Set();
 // Hilfsfunktion für Feld-Mapping (App camelCase -> Proto snake_case)
 function mapAppToProto(data) {
     if (!data) return data;
-    const p = { ...data };
-    // Mappe alle bekannten Felder auf ihre Proto-Namen
-    if (data.deviceId) p.device_id = data.deviceId;
-    if (data.pointId) p.point_id = data.pointId;
-    if (data.alarmActive !== undefined) p.alarm_active = data.alarmActive;
-    if (data.isAwake !== undefined) p.is_awake = data.isAwake;
-    if (data.isWatched !== undefined) p.is_watched = data.isWatched;
-    if (data.isLocked !== undefined) p.is_locked = data.isLocked;
-    if (data.isMotion !== undefined) p.is_motion = data.isMotion;
-    if (data.isWifi !== undefined) p.is_wifi = data.isWifi;
-    if (data.fcmToken) p.fcm_token = data.fcmToken;
-    if (data.geofenceEvent) p.geofence_event = data.geofenceEvent;
-    if (data.motionState) p.motion_state = data.motionState;
-    if (data.batteryPct !== undefined) p.battery = data.batteryPct;
-    if (data.snappedLat) p.snapped_lat = data.snappedLat;
-    if (data.snappedLon) p.snapped_lon = data.snappedLon;
-    if (data.visualLat) p.visual_lat = data.visualLat;
-    if (data.visualLon) p.visual_lon = data.visualLon;
-    if (data.watcherName) p.watcher_name = data.watcherName;
+    // Erstelle ein frisches Objekt für das Proto-Format
+    const p = {
+        device_id: data.deviceId,
+        lat: data.lat || 0,
+        lon: data.lon || 0,
+        timestamp: data.timestamp ? (typeof data.timestamp === 'number' ? data.timestamp : Date.now()) : Date.now(),
+        name: data.name || "",
+        status: data.status || "online",
+        battery: data.battery !== undefined ? data.battery : (data.batteryPct !== undefined ? data.batteryPct : 0),
+        speed: data.speed || 0,
+        bearing: data.bearing || 0,
+        accuracy: data.accuracy || 10,
+        alarm_active: !!data.alarmActive,
+        is_awake: data.isAwake !== undefined ? !!data.isAwake : true,
+        is_watched: !!data.isWatched,
+        is_locked: !!data.isLocked,
+        is_motion: !!data.isMotion,
+        is_wifi: !!data.isWifi,
+        accident: !!data.accident,
+        watcher_name: data.watcherName || "",
+        fcm_token: data.fcmToken || "",
+        snapped_lat: data.snappedLat || 0,
+        snapped_lon: data.snappedLon || 0,
+        visual_lat: data.visualLat || 0,
+        visual_lon: data.visualLon || 0,
+        geofence_event: data.geofenceEvent || "",
+        motion_state: data.motionState || "STILL",
+        offline: !!data.offline
+    };
     return p;
 }
 
