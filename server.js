@@ -487,7 +487,7 @@ async function handleEvents(id, data, old) {
         let namePart = parts.slice(1).join(':').trim();
 
         if (!namePart) {
-            namePart = 'Unbekannte Zone';
+            namePart = 'Zone';
         }
 
         const key = `gf:${id}:${eventStr}`;
