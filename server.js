@@ -390,18 +390,19 @@ function updateDevice(id, data) {
         console.log(`🔋 Battery Update for ${id}: ${old.battery}% -> ${data.battery}%`);
     }
 
+    // --- 1. KOMBINIERTER ZUSTAND (Erhalt von Watch-Status und Token) ---
     const sanitized = {
         deviceId: id,
         name: data.name || old.name,
         lat: data.lat ?? old.lat,
         lon: data.lon ?? old.lon,
         battery: data.battery ?? old.battery,
-        batteryPct: data.battery ?? old.battery, // 🔥 Erhöht App-Kompatibilität
+        batteryPct: data.battery ?? old.battery,
         speed: data.speed ?? old.speed,
         bearing: data.bearing ?? old.bearing,
-        timestamp: data.timestamp ?? Date.now(),
+        timestamp: data.timestamp || old.timestamp || Date.now(),
         accuracy: data.accuracy ?? old.accuracy,
-        fcmToken: data.fcmToken || old.fcmToken,
+        fcmToken: data.fcmToken || data.fcm_token || old.fcmToken,
         snappedLat: data.snappedLat ?? old.snappedLat,
         snappedLon: data.snappedLon ?? old.snappedLon,
         visualLat: data.visualLat ?? old.visualLat,
@@ -412,6 +413,11 @@ function updateDevice(id, data) {
         isLocked: data.isLocked ?? old.isLocked ?? false,
         isMotion: data.isMotion ?? old.isMotion ?? false,
         isWifi: data.isWifi ?? old.isWifi ?? false,
+
+        // 🔥 KRITISCH: Diese Felder müssen erhalten bleiben!
+        isWatched: old.isWatched || (data.isWatched ?? false),
+        watcherName: old.watcherName || data.watcherName,
+
         status: 'online',
         lastSeen: Date.now()
     };
