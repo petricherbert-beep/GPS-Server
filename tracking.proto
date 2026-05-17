@@ -1,8 +1,5 @@
 syntax = "proto3";
 
-option java_package = "com.example.gpstrackingapp.proto";
-option java_multiple_files = true;
-
 package tracking;
 
 message LocationUpdateProto {
@@ -77,14 +74,24 @@ message DeviceListRequest {
   string api_key = 1;
 }
 
-service TrackingService {
-  rpc TrackLocation(stream LocationUpdateProto) returns (stream TrackingResponse);
-  rpc GetDevices(DeviceListRequest) returns (DeviceListProto);
-}
-
 message TrackingResponse {
   oneof update {
     DeviceLocationProto device = 1;
     bool reload_geofences = 2;
   }
+}
+
+// 🔥 ENVELOPE DESIGN
+message TrackingEvent {
+  string device_id = 1;
+  int64 timestamp = 2;
+  oneof payload {
+    LocationUpdateProto location_update = 3;
+    TrackingResponse server_response = 4;
+  }
+}
+
+service TrackingService {
+  rpc TrackLocation(stream TrackingEvent) returns (stream TrackingEvent);
+  rpc GetDevices(DeviceListRequest) returns (DeviceListProto);
 }
