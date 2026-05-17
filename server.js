@@ -57,8 +57,13 @@ function pushUpdateToAll(device) {
     io.to(device.deviceId).emit('location_update', device);
 
     // 2. gRPC Streams
+    // 🔥 WRAP: In TrackingEvent einpacken für den neuen gRPC Standard
     const response = {
-        device: device
+        device_id: device.deviceId,
+        timestamp: Date.now(),
+        server_response: {
+            device: device
+        }
     };
 
     for (const call of grpcStreams) {
@@ -197,15 +202,23 @@ grpcServer.addService(trackingProto.TrackingService.service, {
             grpcStreams.delete(call);
         }
 
-        call.on('data', (update) => {
+        call.on('data', (event) => {
+            // 🔥 UNWRAP: Wir müssen aus dem TrackingEvent das LocationUpdate holen
+            const update = event.location_update;
+            if (!update) return;
+
             const data = mapProtoToApp(update);
             const id = data.deviceId?.toLowerCase();
             if (id) {
                 const wasCritical = data.alarmActive || data.accident;
                 updateDevice(id, data);
                 saveDevicesSafe({ immediate: wasCritical });
+
+                // 🔥 INFO FÜR ANDERE: Wer schaut gerade zu?
                 const updated = devices[id];
-                if (updated) pushUpdateToAll(updated);
+                if (updated) {
+                    pushUpdateToAll(updated);
+                }
             }
         });
 
