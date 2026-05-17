@@ -356,7 +356,15 @@ async function init() {
             }
         }
     } catch (e) { devices = {}; }
-    try { geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8')); } catch (e) { geofences = []; }
+    try {
+        geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8'));
+        // 🔥 SANITIZATION: Namen korrigieren, falls leer
+        geofences.forEach(gf => {
+            if (!gf.name || gf.name.trim() === "") {
+                gf.name = "Zone " + (gf.id ? gf.id.substring(0, 4) : "X");
+            }
+        });
+    } catch (e) { geofences = []; }
 }
 init();
 
@@ -468,18 +476,30 @@ async function handleEvents(id, data, old) {
     const device = devices[id];
     if (!device) return;
 
+    const eventStr = data.geofenceEvent || "";
     const IGNORE_EVENTS = ["heartbeat", "token_refresh", "audit_check", "token_init", "token_update", "app_visible", "self_watch_active"];
-    if (data.geofenceEvent && !IGNORE_EVENTS.includes(data.geofenceEvent)) {
-        const key = `gf:${id}:${data.geofenceEvent}`;
+
+    if (eventStr && !IGNORE_EVENTS.includes(eventStr)) {
+        console.log(`📍 GEOFENCE EVENT for ${id}: ${eventStr}`);
+        const parts = eventStr.split(':');
+        const actionPrefix = parts[0];
+        // 🔥 Robustere Extraktion des Namens
+        let namePart = parts.slice(1).join(':').trim();
+
+        if (!namePart) {
+            namePart = 'Unbekannte Zone';
+        }
+
+        const key = `gf:${id}:${eventStr}`;
         // 🔥 Cooldown auf 60s reduziert für besseres Test-Feedback
         if (!lastPushTimes[key] || (now - lastPushTimes[key] > 60000)) {
             lastPushTimes[key] = now;
             await broadcast(id, {
                 type: 'geofence_event',
                 deviceId: id,
-                zoneName: data.geofenceEvent.split(':')[1] || 'Zone',
+                zoneName: namePart,
                 deviceName: device.name || id,
-                action: data.geofenceEvent.startsWith('enter') ? 'betreten' : 'verlassen'
+                action: actionPrefix.startsWith('enter') ? 'betreten' : 'verlassen'
             });
         }
     }
@@ -743,6 +763,10 @@ app.get(['/geofences', '/v1/geofences'], (req, res) => res.json(geofences));
 app.post(['/geofences', '/v1/geofences'], async (req, res) => {
     const gf = req.body;
     if (!gf.id) return res.sendStatus(400);
+    // 🔥 Sicherstellen, dass ein Name vorhanden ist
+    if (!gf.name || gf.name.trim() === "") {
+        gf.name = "Zone " + gf.id.substring(0, 4);
+    }
     geofences = geofences.filter(item => item.id !== gf.id);
     geofences.push(gf);
     await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
