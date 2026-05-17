@@ -416,11 +416,12 @@ async function handleEvents(id, data, old) {
     const IGNORE_EVENTS = ["heartbeat", "token_refresh", "audit_check", "token_init", "token_update", "app_visible", "self_watch_active"];
     if (data.geofenceEvent && !IGNORE_EVENTS.includes(data.geofenceEvent)) {
         const key = `gf:${id}:${data.geofenceEvent}`;
-        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 600000)) {
+        // 🔥 Cooldown auf 60s reduziert für besseres Test-Feedback
+        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 60000)) {
             lastPushTimes[key] = now;
             await broadcast(id, {
                 type: 'geofence_event',
-                deviceId: id, // 🔥 FIX: DeviceId für Filterung im Client
+                deviceId: id,
                 zoneName: data.geofenceEvent.split(':')[1] || 'Zone',
                 deviceName: device.name || id,
                 action: data.geofenceEvent.startsWith('enter') ? 'betreten' : 'verlassen'
@@ -444,7 +445,8 @@ async function handleEvents(id, data, old) {
 
     if (data.alarmActive === true && old.alarmActive !== true) {
         const key = `alarm:${id}`;
-        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 300000)) {
+        // 🔥 Cooldown auf 30s reduziert
+        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 30000)) {
             lastPushTimes[key] = now;
             console.log(`🔊 ALARM BROADCAST for ${id}`);
             await broadcast(id, {
@@ -579,10 +581,32 @@ app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], (req, res) => {
     const id = req.params.id.toLowerCase();
     const active = req.query.active === 'true';
     if (!devices[id]) return res.sendStatus(404);
+
+    const old = { ...devices[id] };
     devices[id].alarmActive = active;
     saveDevicesSafe({ immediate: true });
+
     const updated = devices[id];
-    if (updated) pushUpdateToAll(updated);
+    if (updated) {
+        pushUpdateToAll(updated);
+        // 🔥 FIX 1: Broadcast an alle ANDEREN (Hilferuf-Meldung)
+        handleEvents(id, { alarmActive: active }, old);
+
+        // 🔥 FIX 2: Direkter Push an das ZIEL-GERÄT (damit der Ton auch im Hintergrund startet)
+        if (active && updated.fcmToken) {
+            admin.messaging().send({
+                data: {
+                    type: 'alarm',
+                    deviceId: id,
+                    message: `Fernauslösung: Alarm wurde aktiviert!`,
+                    deviceName: updated.name || id
+                },
+                token: updated.fcmToken,
+                android: { priority: 'high' }
+            }).catch(e => console.error("Direct Alarm Push Error:", e));
+        }
+    }
+
     io.to(id).emit('command', { deviceId: id, action: active ? 'START_ALARM' : 'STOP_ALARM' });
     res.sendStatus(200);
 });
