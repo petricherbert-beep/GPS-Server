@@ -433,8 +433,9 @@ function updateDevice(id, data) {
     // 🔥 V50: NAMENS-DEDUPLIZIERUNG (Schutz gegen Geister-Marker)
     // Wenn ein neues Gerät einen Namen sendet, löschen wir alle anderen IDs mit diesem Namen.
     if (data.name && data.name.length > 1) {
+        const newName = data.name.toLowerCase().trim();
         for (const existingId in devices) {
-            if (existingId !== id && devices[existingId].name === data.name) {
+            if (existingId !== id && devices[existingId].name && devices[existingId].name.toLowerCase().trim() === newName) {
                 console.log(`🧹 Purging duplicate name entry: ${existingId} (Name: ${data.name})`);
                 delete devices[existingId];
             }
