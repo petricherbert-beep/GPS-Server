@@ -12,6 +12,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import rateLimit from 'express-rate-limit';
 
+import compression from 'compression';
+import { z } from 'zod';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -47,6 +50,28 @@ const LocationBatchProto = root.lookupType("LocationBatchProto");
 const DeviceLocationProto = root.lookupType("DeviceLocationProto");
 const DeviceListProto = root.lookupType("DeviceListProto");
 
+// --- SCHEMA VALIDATION ---
+const locationSchema = z.object({
+    deviceId: z.string(),
+    lat: z.number().min(-90).max(90).optional(),
+    lon: z.number().min(-180).max(180).optional(),
+    timestamp: z.number().optional(),
+    accuracy: z.number().optional(),
+    speed: z.number().optional(),
+    bearing: z.number().optional(),
+    battery: z.number().optional(),
+    fcmToken: z.string().optional(),
+    alarmActive: z.boolean().optional(),
+    accident: z.boolean().optional(),
+    isLocked: z.boolean().optional(),
+    isMotion: z.boolean().optional(),
+    isWifi: z.boolean().optional(),
+    motionState: z.string().optional(),
+    name: z.string().optional()
+});
+
+const batchSchema = z.array(locationSchema);
+
 // --- gRPC STATE ---
 const grpcStreams = new Set();
 
@@ -66,6 +91,7 @@ function mapAppToProto(data) {
     if (data.fcmToken) p.fcm_token = data.fcmToken;
     if (data.geofenceEvent) p.geofence_event = data.geofenceEvent;
     if (data.motionState) p.motion_state = data.motionState;
+    if (data.battery !== undefined) p.battery = data.battery;
     if (data.snappedLat) p.snapped_lat = data.snappedLat;
     if (data.snappedLon) p.snapped_lon = data.snappedLon;
     if (data.visualLat) p.visual_lat = data.visualLat;
@@ -183,7 +209,8 @@ async function initFirebase() {
 initFirebase();
 
 const app = express();
-app.set('trust proxy', 1); // 🔥 FIX: Erlaubt express-rate-limit IP-Erkennung hinter Render-Proxy
+app.set('trust proxy', 1);
+app.use(compression()); // 🔥 FIX: Compression for all requests
 app.use(cors({ origin: "*" }));
 
 // --- 🛡️ RATE LIMITING ---
@@ -210,17 +237,29 @@ app.use('/v1/geofences', adminLimiter);
 const grpcServer = new grpc.Server();
 grpcServer.addService(trackingProto.TrackingService.service, {
     GetDevices: (call, callback) => {
-        if (call.request.api_key !== API_KEY) {
+        const apiKey = call.metadata.get('x-api-key')[0];
+        if (apiKey !== API_KEY) {
             return callback({ code: grpc.status.UNAUTHENTICATED, details: "Invalid API Key" });
         }
         callback(null, { devices: Object.values(devices) });
     },
     TrackLocation: (call) => {
+        const apiKey = call.metadata.get('x-api-key')[0];
+        if (apiKey !== API_KEY) {
+            console.warn("⚠️ gRPC Auth-Fehler: TrackLocation abgelehnt");
+            call.emit('error', {
+                code: grpc.status.UNAUTHENTICATED,
+                details: 'Invalid API Key'
+            });
+            return call.end();
+        }
+
         if (grpcStreams.size >= 1000) {
             console.warn("❌ gRPC Reject: Max connections reached");
             return call.end();
         }
 
+        call.lastActivity = Date.now();
         grpcStreams.add(call);
 
         function cleanup() {
@@ -228,6 +267,7 @@ grpcServer.addService(trackingProto.TrackingService.service, {
         }
 
         call.on('data', (event) => {
+            call.lastActivity = Date.now();
             // 🔥 UNWRAP: Wir müssen aus dem TrackingEvent das LocationUpdate holen
             const update = event.location_update;
             if (!update) return;
@@ -264,22 +304,37 @@ grpcServer.addService(trackingProto.TrackingService.service, {
     }
 });
 
+// --- gRPC CLEANUP WORKER ---
+setInterval(() => {
+    const now = Date.now();
+    for (const call of grpcStreams) {
+        if (now - (call.lastActivity || 0) > 300000) {
+            console.log(`🧹 Killing stale gRPC stream (ID: ${call.deviceId || 'unknown'})`);
+            call.end();
+            grpcStreams.delete(call);
+        }
+    }
+}, 60000);
+
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
+
+// --- 🌐 SOCKET.IO HANDSHAKE AUTH ---
+io.use((socket, next) => {
+    const apiKey = socket.handshake.auth?.apiKey || socket.handshake.query?.apiKey;
+    if (apiKey !== API_KEY) {
+        console.warn(`⚠️ Socket.IO Auth rejected`);
+        return next(new Error("Unauthorized"));
+    }
+    next();
+});
 
 // --- 🌐 SOCKET.IO LOGIK ---
 io.on('connection', (socket) => {
     socket.on('join_device', (data) => {
         if (!data) return;
         const deviceId = (typeof data === 'string' ? data : data.deviceId)?.toLowerCase().trim();
-        const apiKey = typeof data === 'object' ? data.apiKey : null;
-
-        // FIX: Mandatory Auth
-        if (apiKey !== API_KEY) {
-            console.warn(`⚠️ Socket Auth-Fehler für: ${deviceId}`);
-            return;
-        }
-
+        // Auth bereits im Handshake erledigt
         if (deviceId) {
             socket.join(deviceId);
             if (devices[deviceId]) socket.emit('location_update', devices[deviceId]);
@@ -305,18 +360,20 @@ app.use((req, res, next) => {
 
 app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
 
-app.use(bodyParser.json({ limit: '200kb' }));
-app.use(bodyParser.raw({
+// FIX: Route-specific Body Parsers to avoid collisions
+const jsonParser = bodyParser.json({ limit: '200kb' });
+const protoParser = bodyParser.raw({
     type: 'application/x-protobuf',
     limit: '200kb'
-}));
+});
 
 let devices = {};
 let geofences = [];
 let lastPushTimes = {};
 
 // 1. Debounced Persistence
-let saveTimer;
+let saveTimer = null;
+let savePending = false;
 
 async function atomicWrite(file, data) {
     const tmp = file + '.tmp';
@@ -325,8 +382,12 @@ async function atomicWrite(file, data) {
 }
 
 function saveDevicesSafe(opts = { immediate: false }) {
+    savePending = true;
+
     if (opts.immediate) {
         if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = null;
+        savePending = false;
         return atomicWrite(DATA_FILE, JSON.stringify(devices, null, 2))
             .then(() => console.log(`🔥 Critical state flushed to disk.`))
             .catch(e => console.error("Critical Save Error:", e));
@@ -336,6 +397,8 @@ function saveDevicesSafe(opts = { immediate: false }) {
 
     saveTimer = setTimeout(async () => {
         saveTimer = null;
+        if (!savePending) return;
+        savePending = false;
         try {
             await atomicWrite(DATA_FILE, JSON.stringify(devices, null, 2));
             console.log(`💾 Devices saved to disk.`);
@@ -569,7 +632,7 @@ async function broadcast(senderId, payload) {
     }
 }
 
-app.post(['/location', '/v1/location'], async (req, res) => {
+app.post(['/location', '/v1/location'], protoParser, jsonParser, async (req, res) => {
     let data = req.body;
     if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         try {
@@ -579,6 +642,15 @@ app.post(['/location', '/v1/location'], async (req, res) => {
             return res.status(400).send("Protobuf Error");
         }
     }
+
+    // 🔥 ZOD VALIDATION
+    const result = locationSchema.safeParse(data);
+    if (!result.success) {
+        console.warn("⚠️ Validation Error:", result.error.format());
+        return res.status(400).json(result.error.format());
+    }
+    data = result.data;
+
     const id = data.deviceId?.toLowerCase();
     if (!id) return res.sendStatus(400);
     updateDevice(id, data);
@@ -588,7 +660,7 @@ app.post(['/location', '/v1/location'], async (req, res) => {
     res.sendStatus(200);
 });
 
-app.post(['/location/update-batch', '/v1/location/batch'], async (req, res) => {
+app.post(['/location/update-batch', '/v1/location/batch'], protoParser, jsonParser, async (req, res) => {
     let batch = [];
     if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         try {
@@ -601,6 +673,14 @@ app.post(['/location/update-batch', '/v1/location/batch'], async (req, res) => {
     } else {
         batch = req.body;
     }
+
+    // 🔥 ZOD VALIDATION
+    const result = batchSchema.safeParse(batch);
+    if (!result.success) {
+        return res.status(400).json(result.error.format());
+    }
+    batch = result.data;
+
     if (!Array.isArray(batch)) return res.sendStatus(400);
     batch.forEach(item => {
         const id = item.deviceId?.toLowerCase();
