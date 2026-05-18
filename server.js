@@ -66,7 +66,6 @@ function mapAppToProto(data) {
     if (data.fcmToken) p.fcm_token = data.fcmToken;
     if (data.geofenceEvent) p.geofence_event = data.geofenceEvent;
     if (data.motionState) p.motion_state = data.motionState;
-    if (data.batteryPct !== undefined) p.battery = data.batteryPct;
     if (data.snappedLat) p.snapped_lat = data.snappedLat;
     if (data.snappedLon) p.snapped_lon = data.snappedLon;
     if (data.visualLat) p.visual_lat = data.visualLat;
