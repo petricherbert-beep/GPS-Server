@@ -92,6 +92,9 @@ function mapAppToProto(data) {
     if (data.geofenceEvent) p.geofence_event = data.geofenceEvent;
     if (data.motionState) p.motion_state = data.motionState;
     if (data.battery !== undefined) p.battery = data.battery;
+    if (data.speed !== undefined) p.speed = data.speed;
+    if (data.bearing !== undefined) p.bearing = data.bearing;
+    if (data.accuracy !== undefined) p.accuracy = data.accuracy;
     if (data.snappedLat) p.snapped_lat = data.snappedLat;
     if (data.snappedLon) p.snapped_lon = data.snappedLon;
     if (data.visualLat) p.visual_lat = data.visualLat;
@@ -177,6 +180,11 @@ function mapProtoToApp(data) {
     mapped.fcmToken = data.fcmToken || data.fcm_token;
     mapped.geofenceEvent = data.geofenceEvent || data.geofence_event;
     mapped.motionState = data.motionState || data.motion_state;
+
+    // Numerical mappings (preserve if existing)
+    mapped.speed = data.speed !== undefined ? data.speed : mapped.speed;
+    mapped.bearing = data.bearing !== undefined ? data.bearing : mapped.bearing;
+    mapped.accuracy = data.accuracy !== undefined ? data.accuracy : mapped.accuracy;
 
     // Akku-Mapping (Harmonisierung zwischen verschiedenen App-Versionen)
     mapped.battery = data.battery !== undefined ? data.battery : (data.batteryPct !== undefined ? data.batteryPct : (data.battery_pct !== undefined ? data.battery_pct : undefined));
