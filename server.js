@@ -433,7 +433,6 @@ function updateDevice(id, data) {
         lat: data.lat ?? old.lat,
         lon: data.lon ?? old.lon,
         battery: data.battery ?? old.battery,
-        batteryPct: data.battery ?? old.battery,
         speed: data.speed ?? old.speed,
         bearing: data.bearing ?? old.bearing,
         timestamp: data.timestamp || old.timestamp || Date.now(),
@@ -468,18 +467,26 @@ async function handleEvents(id, data, old) {
     const device = devices[id];
     if (!device) return;
 
-    const IGNORE_EVENTS = ["heartbeat", "token_refresh", "audit_check", "token_init", "token_update", "app_visible", "self_watch_active"];
-    if (data.geofenceEvent && !IGNORE_EVENTS.includes(data.geofenceEvent)) {
+    // 🔥 STRENGE PRÜFUNG: Nur echte Geofence-Events (enter:X oder exit:X) verarbeiten.
+    // Dies verhindert falsche Benachrichtigungen durch Heartbeats (asc_heartbeat, sync_heartbeat etc.).
+    const isGeofence = typeof data.geofenceEvent === 'string' &&
+                      (data.geofenceEvent.startsWith('enter:') || data.geofenceEvent.startsWith('exit:'));
+
+    if (isGeofence) {
         const key = `gf:${id}:${data.geofenceEvent}`;
-        // 🔥 Cooldown auf 60s reduziert für besseres Test-Feedback
-        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 60000)) {
+        // Cooldown auf 120s erhöht, um GPS-Jitter an Grenzen zu dämpfen.
+        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 120000)) {
             lastPushTimes[key] = now;
+            const parts = data.geofenceEvent.split(':');
+            const action = parts[0];
+            const zoneName = parts.slice(1).join(':') || 'Zone';
+
             await broadcast(id, {
                 type: 'geofence_event',
                 deviceId: id,
-                zoneName: data.geofenceEvent.split(':')[1] || 'Zone',
+                zoneName: zoneName,
                 deviceName: device.name || id,
-                action: data.geofenceEvent.startsWith('enter') ? 'betreten' : 'verlassen'
+                action: action === 'enter' ? 'betreten' : 'verlassen'
             });
         }
     }
