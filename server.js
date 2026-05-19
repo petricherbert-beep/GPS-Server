@@ -368,12 +368,12 @@ app.use((req, res, next) => {
 
 app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
 
-// FIX: Route-specific Body Parsers to avoid collisions
-const jsonParser = bodyParser.json({ limit: '200kb' });
-const protoParser = bodyParser.raw({
+// FIX: Standard Body Parsers (Global) to ensure req.body is always defined
+app.use(bodyParser.json({ limit: '200kb' }));
+app.use(bodyParser.raw({
     type: 'application/x-protobuf',
     limit: '200kb'
-});
+}));
 
 let devices = {};
 let geofences = [];
@@ -640,7 +640,7 @@ async function broadcast(senderId, payload) {
     }
 }
 
-app.post(['/location', '/v1/location'], protoParser, jsonParser, async (req, res) => {
+app.post(['/location', '/v1/location'], async (req, res) => {
     let data = req.body;
     if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         try {
@@ -668,7 +668,7 @@ app.post(['/location', '/v1/location'], protoParser, jsonParser, async (req, res
     res.sendStatus(200);
 });
 
-app.post(['/location/update-batch', '/v1/location/batch'], protoParser, jsonParser, async (req, res) => {
+app.post(['/location/update-batch', '/v1/location/batch'], async (req, res) => {
     let batch = [];
     if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         try {
@@ -836,7 +836,7 @@ app.get(['/geofences', '/v1/geofences'], (req, res) => res.json(geofences));
 
 app.post(['/geofences', '/v1/geofences'], async (req, res) => {
     const gf = req.body;
-    if (!gf.id) return res.sendStatus(400);
+    if (!gf || !gf.id) return res.sendStatus(400);
     geofences = geofences.filter(item => item.id !== gf.id);
     geofences.push(gf);
     await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
