@@ -154,7 +154,9 @@ function pushUpdateToAll(device) {
         server_response: { device: protoDevice }
     };
 
-    if (device.geofenceEvent) console.log(`🚩 GEOFENCE EVENT: ${device.deviceId} -> ${device.geofenceEvent}`);
+    if (device.geofenceEvent && (device.geofenceEvent.startsWith('enter:') || device.geofenceEvent.startsWith('exit:'))) {
+        console.log(`🚩 GEOFENCE EVENT: ${device.deviceId} -> ${device.geofenceEvent}`);
+    }
     if (device.alarmActive) console.log(`🔊 ALARM ACTIVE: ${device.deviceId}`);
     if (device.accident) console.log(`🚨 ACCIDENT ALERT: ${device.deviceId}`);
 
@@ -441,10 +443,13 @@ function updateDevice(id, data) {
     const alarmActive = (old.alarmActive && !data.alarmActive && Date.now() - (old.lastSeen || 0) < 30000) ? true : data.alarmActive;
     if (data.battery !== undefined && data.battery !== old.battery) console.log(`🔋 ${id}: ${old.battery ?? 'new'} -> ${data.battery}%`);
 
+    const isRealGeofence = typeof data.geofenceEvent === 'string' && (data.geofenceEvent.startsWith('enter:') || data.geofenceEvent.startsWith('exit:'));
+
     devices[id] = {
         ...old, ...data, deviceId: id,
         fcmToken: fcmToken,
         name: name,
+        geofenceEvent: isRealGeofence ? data.geofenceEvent : undefined,
         alarmActive: alarmActive ?? old.alarmActive ?? false,
         status: 'online', lastSeen: Date.now()
     };
