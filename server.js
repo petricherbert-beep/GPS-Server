@@ -73,6 +73,7 @@ const locationSchema = z.object({
     isMotion: z.boolean().optional(),
     isWifi: z.boolean().optional(),
     motionState: z.string().optional(),
+    geofenceEvent: z.string().optional(),
     name: z.string().optional()
 });
 
