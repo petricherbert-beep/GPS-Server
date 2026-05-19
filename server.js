@@ -464,6 +464,12 @@ async function handleEvents(id, data, old) {
 
 async function broadcast(senderId, payload) {
     const tokens = Object.values(devices).filter(d => d.deviceId !== senderId && d.fcmToken).map(d => d.fcmToken);
+
+    if (tokens.length === 0) {
+        console.log(`ℹ️ BCast: No target tokens for event ${payload.type}`);
+        return;
+    }
+
     for (let i = 0; i < tokens.length; i += 500) {
         try {
             const res = await admin.messaging().sendEachForMulticast({ data: payload, tokens: tokens.slice(i, i + 500), android: { priority: 'high' } });
