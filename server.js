@@ -433,11 +433,18 @@ async function init() {
 function updateDevice(id, data) {
     const old = devices[id] || {};
     if (data.timestamp < old.timestamp) return;
+
+    // 🔥 TOKEN PROTECTION: Don't overwrite with empty values
+    const fcmToken = (data.fcmToken || data.fcm_token) || old.fcmToken;
+    const name = data.name || old.name;
+
     const alarmActive = (old.alarmActive && !data.alarmActive && Date.now() - (old.lastSeen || 0) < 30000) ? true : data.alarmActive;
     if (data.battery !== undefined && data.battery !== old.battery) console.log(`🔋 ${id}: ${old.battery ?? 'new'} -> ${data.battery}%`);
 
     devices[id] = {
         ...old, ...data, deviceId: id,
+        fcmToken: fcmToken,
+        name: name,
         alarmActive: alarmActive ?? old.alarmActive ?? false,
         status: 'online', lastSeen: Date.now()
     };
@@ -458,18 +465,23 @@ async function handleEvents(id, data, old) {
         if (Date.now() - (lastPushTimes[key] || 0) > 120000) {
             lastPushTimes[key] = Date.now();
             const [action, ...name] = data.geofenceEvent.split(':');
-            await broadcast(id, { type: 'geofence_event', deviceId: id, zoneName: name.join(':'), deviceName: device.name || id, action: action === 'enter' ? 'betreten' : 'verlassen' });
+            const zoneName = name.join(':') || 'Zone';
+            await broadcast(id, { type: 'geofence_event', deviceId: id, zoneName: zoneName, deviceName: device.name || id, action: action === 'enter' ? 'betreten' : 'verlassen' });
         }
     }
 }
 
 async function broadcast(senderId, payload) {
-    const tokens = Object.values(devices).filter(d => d.deviceId !== senderId && d.fcmToken).map(d => d.fcmToken);
+    const tokens = Object.values(devices)
+        .filter(d => d.deviceId !== senderId && d.fcmToken && d.fcmToken.length > 5)
+        .map(d => d.fcmToken);
 
     if (tokens.length === 0) {
-        console.log(`ℹ️ BCast: No target tokens for event ${payload.type}`);
+        console.log(`ℹ️ BCast: No target tokens for event ${payload.type} (Active devices: ${Object.keys(devices).length})`);
         return;
     }
+
+    console.log(`📣 Broadcasting ${payload.type} to ${tokens.length} devices...`);
 
     for (let i = 0; i < tokens.length; i += 500) {
         try {
