@@ -15,6 +15,15 @@ import rateLimit from 'express-rate-limit';
 import compression from 'compression';
 import { z } from 'zod';
 
+// --- 🧱 TOP-LEVEL CRASH PROTECTION ---
+process.on("uncaughtException", (err) => {
+    console.error("💥 UNCAUGHT EXCEPTION:", err);
+});
+
+process.on("unhandledRejection", (err) => {
+    console.error("💥 UNHANDLED PROMISE REJECTION:", err);
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -25,8 +34,6 @@ if (!process.env.API_KEY) {
 }
 const API_KEY = process.env.API_KEY;
 const PORT = process.env.PORT || 3000;
-// Render unterstützt standardmäßig nur einen öffentlichen Port.
-// Wir lassen gRPC auf einem internen Port laufen oder nutzen den gleichen, falls ein Proxy davor sitzt.
 const GRPC_PORT = process.env.GRPC_PORT || 50051;
 const DATA_FILE = path.join(__dirname, 'devices.json');
 const GEOFENCE_FILE = path.join(__dirname, 'geofences.json');
@@ -35,14 +42,13 @@ const GEOFENCE_FILE = path.join(__dirname, 'geofences.json');
 const PROTO_PATH = path.join(__dirname, 'tracking.proto');
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
     keepCase: true,
-    longs: Number, // FIX: Konsistent Number für alle
+    longs: Number,
     enums: String,
-    defaults: false, // FIX: Konsistent keine Defaults (erleichtert Null-Handling)
+    defaults: false,
     oneofs: true
 });
 const trackingProto = grpc.loadPackageDefinition(packageDefinition).tracking;
 
-// Für Legacy REST/Socket (ProtobufJS)
 const protoSource = await fs.readFile(PROTO_PATH, 'utf8');
 const root = protobuf.parse(protoSource).root;
 const LocationUpdateProto = root.lookupType("LocationUpdateProto");
@@ -72,14 +78,23 @@ const locationSchema = z.object({
 
 const batchSchema = z.array(locationSchema);
 
-// --- gRPC STATE ---
+// --- 🛡️ HELPER: SAFE REQUEST WRAPPER ---
+const safe = fn => (req, res, next) =>
+    Promise.resolve(fn(req, res, next)).catch(err => {
+        console.error("🔥 ROUTE ERROR:", err);
+        if (!res.headersSent) res.sendStatus(500);
+    });
+
+// --- STATE ---
+let devices = {};
+let geofences = [];
+let lastPushTimes = {};
 const grpcStreams = new Set();
 
-// Hilfsfunktion für Feld-Mapping (App camelCase -> Proto snake_case)
+// --- gRPC HELPERS ---
 function mapAppToProto(data) {
     if (!data) return data;
     const p = { ...data };
-    // Mappe alle bekannten Felder auf ihre Proto-Namen
     if (data.deviceId) p.device_id = data.deviceId;
     if (data.pointId) p.point_id = data.pointId;
     if (data.alarmActive !== undefined) p.alarm_active = data.alarmActive;
@@ -103,794 +118,375 @@ function mapAppToProto(data) {
     return p;
 }
 
-function pushUpdateToAll(device) {
-    if (!device || !device.deviceId) return;
-
-    // 1. Socket.IO
-    io.to(device.deviceId).emit('location_update', device);
-
-    // 2. gRPC Streams
-    // 🔥 WRAP & MAP: In TrackingEvent einpacken und Feldnamen korrigieren
-    const protoDevice = mapAppToProto(device);
-    const response = {
-        device_id: device.deviceId,
-        timestamp: Date.now(),
-        server_response: {
-            device: protoDevice
-        }
-    };
-
-    for (const call of grpcStreams) {
-        try {
-            // FIX: Reliable Backpressure & Memory Protection
-            if (call.writable === false) {
-                grpcStreams.delete(call);
-                continue;
-            }
-
-            const ok = call.write(response);
-            if (!ok) {
-                call._pendingWrites = (call._pendingWrites || 0) + 1;
-                if (call._pendingWrites > 100) {
-                    console.warn(`⚠️ gRPC Backpressure: Force closing slow client`);
-                    call.end();
-                    grpcStreams.delete(call);
-                }
-            } else {
-                call._pendingWrites = 0;
-            }
-        } catch (e) {
-            console.error("gRPC Write Error:", e);
-            grpcStreams.delete(call);
-        }
-    }
-}
-
-function broadcastGeofenceReload() {
-    const response = { reload_geofences: true };
-    for (const call of grpcStreams) {
-        try {
-            if (call.writable !== false) call.write(response);
-        } catch (e) {
-            grpcStreams.delete(call);
-        }
-    }
-}
-
-// Hilfsfunktion für Feld-Mapping (Proto snake_case -> App camelCase)
 function mapProtoToApp(data) {
     if (!data) return data;
     const mapped = { ...data };
-
-    // ProtoJS ordnet snake_case Felder automatisch camelCase zu (visual_lat -> visualLat)
-    // Wir muessen hier sicherstellen, dass wir die Felder finden, falls defaults:false aktiv war.
-
     mapped.deviceId = data.deviceId || data.device_id;
     mapped.pointId = data.pointId || data.point_id;
-
-    // Boolean Status Flags (Defaults erzwingen, falls undefined)
-    mapped.alarmActive = (data.alarmActive !== undefined) ? data.alarmActive : (data.alarm_active !== undefined ? data.alarm_active : false);
-    mapped.isAwake = (data.isAwake !== undefined) ? data.isAwake : (data.is_awake !== undefined ? data.is_awake : false);
-    mapped.isWatched = (data.isWatched !== undefined) ? data.isWatched : (data.is_watched !== undefined ? data.is_watched : false);
-    mapped.isLocked = (data.isLocked !== undefined) ? data.isLocked : (data.is_locked !== undefined ? data.is_locked : false);
-    mapped.isMotion = (data.isMotion !== undefined) ? data.isMotion : (data.is_motion !== undefined ? data.is_motion : false);
-    mapped.isWifi = (data.isWifi !== undefined) ? data.isWifi : (data.is_wifi !== undefined ? data.is_wifi : false);
-    mapped.accident = (data.accident !== undefined) ? data.accident : (data.accident !== undefined ? data.accident : false);
-
+    mapped.alarmActive = data.alarmActive ?? data.alarm_active ?? false;
+    mapped.isAwake = data.isAwake ?? data.is_awake ?? false;
+    mapped.isWatched = data.isWatched ?? data.is_watched ?? false;
+    mapped.isLocked = data.isLocked ?? data.is_locked ?? false;
+    mapped.isMotion = data.isMotion ?? data.is_motion ?? false;
+    mapped.isWifi = data.isWifi ?? data.is_wifi ?? false;
+    mapped.accident = data.accident ?? false;
     mapped.fcmToken = data.fcmToken || data.fcm_token;
     mapped.geofenceEvent = data.geofenceEvent || data.geofence_event;
     mapped.motionState = data.motionState || data.motion_state;
-
-    // Numerical mappings (preserve if existing)
-    mapped.speed = data.speed !== undefined ? data.speed : mapped.speed;
-    mapped.bearing = data.bearing !== undefined ? data.bearing : mapped.bearing;
-    mapped.accuracy = data.accuracy !== undefined ? data.accuracy : mapped.accuracy;
-
-    // Akku-Mapping (Harmonisierung zwischen verschiedenen App-Versionen)
-    mapped.battery = data.battery !== undefined ? data.battery : (data.batteryPct !== undefined ? data.batteryPct : (data.battery_pct !== undefined ? data.battery_pct : undefined));
-
-    // Optionale numerische Felder
-    // Aber durch 'optional' im Schema kommen sie nun meist als undefined, wenn sie fehlen.
+    mapped.battery = data.battery ?? data.batteryPct ?? data.battery_pct;
     mapped.snappedLat = data.snappedLat || data.snapped_lat;
     mapped.snappedLon = data.snappedLon || data.snapped_lon;
     mapped.visualLat = data.visualLat || data.visual_lat;
     mapped.visualLon = data.visualLon || data.visual_lon;
-
-    if (mapped.snappedLat === 0 && mapped.snappedLon === 0) {
-        delete mapped.snappedLat; delete mapped.snappedLon;
-    }
     return mapped;
 }
 
-// --- FIREBASE INITIALISIERUNG ---
+// --- BROADCAST LOGIC ---
+function pushUpdateToAll(device) {
+    if (!device?.deviceId) return;
+    io.to(device.deviceId).emit('location_update', device);
+
+    const protoDevice = mapAppToProto(device);
+    const response = {
+        device_id: device.deviceId,
+        timestamp: Date.now(),
+        server_response: { device: protoDevice }
+    };
+
+    if (device.geofenceEvent) console.log(`🚩 GEOFENCE EVENT: ${device.deviceId} -> ${device.geofenceEvent}`);
+    if (device.alarmActive) console.log(`🔊 ALARM ACTIVE: ${device.deviceId}`);
+    if (device.accident) console.log(`🚨 ACCIDENT ALERT: ${device.deviceId}`);
+
+    for (const call of grpcStreams) {
+        try {
+            if (!call || call.destroyed) { grpcStreams.delete(call); continue; }
+            const ok = call.write(response);
+            if (!ok) {
+                call._pendingWrites = (call._pendingWrites || 0) + 1;
+                if (call._pendingWrites > 100) { call.end(); grpcStreams.delete(call); }
+            } else { call._pendingWrites = 0; }
+        } catch (e) { grpcStreams.delete(call); }
+    }
+}
+
+function broadcastGeofenceReload() {
+    for (const call of grpcStreams) {
+        try { if (!call.destroyed) call.write({ reload_geofences: true }); }
+        catch (e) { grpcStreams.delete(call); }
+    }
+}
+
+// --- FIREBASE ---
 async function initFirebase() {
     try {
         const envKey = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.firebase_service_account;
         const serviceAccount = envKey ? JSON.parse(envKey) : JSON.parse(await fs.readFile(path.join(__dirname, 'firebase-key.json'), 'utf8'));
         admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
         console.log("✅ Firebase Admin aktiv.");
-    } catch (e) {
-        console.error("❌ Firebase Fehler:", e.message);
-        process.exit(1);
-    }
+    } catch (e) { console.error("❌ Firebase Fehler:", e.message); throw e; }
 }
-initFirebase();
 
 const app = express();
 app.set('trust proxy', 1);
-app.use(compression()); // 🔥 FIX: Compression for all requests
+app.use(compression());
 app.use(cors({ origin: "*" }));
 
 // --- 🛡️ RATE LIMITING ---
-const telemetryLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 500, // Hoher Durchsatz für GPS Punkte
-    message: "Zu viele Standort-Updates."
-});
+app.use('/location', rateLimit({ windowMs: 60000, max: 2000, skipSuccessfulRequests: true }));
+app.use(['/devices', '/geofences'], rateLimit({ windowMs: 60000, max: 120 }));
 
-const adminLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 60, // Strenger Schutz für Alarme/Zonen/Wakeups
-    message: "Administrative Limits erreicht."
-});
-
-app.use('/location', telemetryLimiter);
-app.use('/v1/location', telemetryLimiter);
-app.use('/devices', adminLimiter);
-app.use('/v1/devices', adminLimiter);
-app.use('/geofences', adminLimiter);
-app.use('/v1/geofences', adminLimiter);
-
-// --- gRPC SERVER IMPLEMENTATION ---
+// --- gRPC SERVER ---
 const grpcServer = new grpc.Server();
 grpcServer.addService(trackingProto.TrackingService.service, {
     GetDevices: (call, callback) => {
-        const apiKey = call.metadata.get('x-api-key')[0];
-        if (apiKey !== API_KEY) {
-            return callback({ code: grpc.status.UNAUTHENTICATED, details: "Invalid API Key" });
-        }
-        callback(null, { devices: Object.values(devices) });
+        const meta = call.metadata.get('x-api-key');
+        if (meta?.[0] !== API_KEY) return callback({ code: grpc.status.UNAUTHENTICATED, details: "Invalid API Key" });
+        callback(null, { devices: Object.values(devices || {}) });
     },
     TrackLocation: (call) => {
-        const apiKey = call.metadata.get('x-api-key')[0];
-        if (apiKey !== API_KEY) {
-            console.warn("⚠️ gRPC Auth-Fehler: TrackLocation abgelehnt");
-            call.emit('error', {
-                code: grpc.status.UNAUTHENTICATED,
-                details: 'Invalid API Key'
-            });
-            return call.end();
-        }
-
-        if (grpcStreams.size >= 1000) {
-            console.warn("❌ gRPC Reject: Max connections reached");
-            return call.end();
-        }
+        const meta = call.metadata.get('x-api-key');
+        if (meta?.[0] !== API_KEY) { call.emit('error', { code: grpc.status.UNAUTHENTICATED }); return call.end(); }
+        if (grpcStreams.size >= 1000) return call.end();
 
         call.lastActivity = Date.now();
         grpcStreams.add(call);
-
-        function cleanup() {
-            grpcStreams.delete(call);
-        }
-
+        const cleanup = () => grpcStreams.delete(call);
         call.on('data', (event) => {
+            if (!call || call.destroyed) return;
             call.lastActivity = Date.now();
-            // 🔥 UNWRAP: Wir müssen aus dem TrackingEvent das LocationUpdate holen
             const update = event.location_update;
             if (!update) return;
-
             const data = mapProtoToApp(update);
             const id = data.deviceId?.toLowerCase();
             if (id) {
-                // 🔥 DUPLIKATS-SCHUTZ: Alte Streams für dieses Gerät finden und schließen
-                for (const oldCall of grpcStreams) {
-                    if (oldCall !== call && oldCall.deviceId === id) {
-                        console.log(`🧹 Closing duplicate gRPC stream for: ${id}`);
-                        oldCall.end();
-                        grpcStreams.delete(oldCall);
-                    }
-                }
-                call.deviceId = id; // ID am Call speichern
-
-                const wasCritical = data.alarmActive || data.accident;
+                for (const old of grpcStreams) { if (old !== call && old.deviceId === id) { try { old.end(); } catch {} grpcStreams.delete(old); } }
+                call.deviceId = id;
                 updateDevice(id, data);
-                saveDevicesSafe({ immediate: wasCritical });
-
-                // 🔥 INFO FÜR ANDERE: Wer schaut gerade zu?
+                saveDevicesSafe({ immediate: data.alarmActive || data.accident });
                 const updated = devices[id];
-                if (updated) {
-                    pushUpdateToAll(updated);
-                }
+                if (updated) pushUpdateToAll(updated);
             }
         });
-
-        call.on('end', cleanup);
-        call.on('error', cleanup);
-        call.on('close', cleanup);
-        call.on('cancelled', cleanup);
+        call.on('end', cleanup); call.on('error', cleanup); call.on('close', cleanup);
     }
 });
 
-// --- gRPC CLEANUP WORKER ---
+// Watchdog
 setInterval(() => {
     const now = Date.now();
-    for (const call of grpcStreams) {
-        if (now - (call.lastActivity || 0) > 300000) {
-            console.log(`🧹 Killing stale gRPC stream (ID: ${call.deviceId || 'unknown'})`);
-            call.end();
-            grpcStreams.delete(call);
-        }
-    }
+    for (const call of grpcStreams) { if (now - (call.lastActivity || 0) > 300000) { try { call.end(); } catch {} grpcStreams.delete(call); } }
 }, 60000);
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// --- 🌐 SOCKET.IO HANDSHAKE AUTH ---
 io.use((socket, next) => {
-    const apiKey = socket.handshake.auth?.apiKey || socket.handshake.query?.apiKey;
-    if (apiKey !== API_KEY) {
-        console.warn(`⚠️ Socket.IO Auth rejected`);
-        return next(new Error("Unauthorized"));
-    }
+    if ((socket.handshake.auth?.apiKey || socket.handshake.query?.apiKey) !== API_KEY) return next(new Error("Unauthorized"));
     next();
 });
 
-// --- 🌐 SOCKET.IO LOGIK ---
 io.on('connection', (socket) => {
     socket.on('join_device', (data) => {
-        if (!data) return;
-        const deviceId = (typeof data === 'string' ? data : data.deviceId)?.toLowerCase().trim();
-        // Auth bereits im Handshake erledigt
-        if (deviceId) {
-            socket.join(deviceId);
-            if (devices[deviceId]) socket.emit('location_update', devices[deviceId]);
-        }
-    });
-
-    socket.on('leave_device', (id) => {
-        if (!id) return;
-        const deviceId = id.toLowerCase().trim();
-        socket.leave(deviceId);
+        const id = (typeof data === 'string' ? data : data?.deviceId)?.toLowerCase().trim();
+        if (id) { socket.join(id); if (devices[id]) socket.emit('location_update', devices[id]); }
     });
 });
 
-// --- 🛡️ MIDDLEWARE: API-KEY ---
+// --- REST ROUTES ---
 app.use((req, res, next) => {
     if (req.path === '/' || req.path.startsWith('/socket.io')) return next();
-
-    // FIX: Nur Header erlauben, Query-Params sind unsicher
-    const providedKey = (req.headers['x-api-key'] || "").trim();
-    if (providedKey !== API_KEY.trim()) return res.sendStatus(401);
+    if (req.headers['x-api-key'] !== API_KEY) return res.sendStatus(401);
     next();
 });
+
+app.use(bodyParser.json({ limit: '200kb' }));
+app.use(bodyParser.raw({ type: 'application/x-protobuf', limit: '200kb' }));
 
 app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
 
-// FIX: Standard Body Parsers (Global) to ensure req.body is always defined
-app.use(bodyParser.json({ limit: '200kb' }));
-app.use(bodyParser.raw({
-    type: 'application/x-protobuf',
-    limit: '200kb'
+app.post(['/location', '/v1/location'], safe(async (req, res) => {
+    let data = req.body;
+    if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+        data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number }));
+    }
+    const val = locationSchema.safeParse(data);
+    if (!val.success) return res.status(400).json(val.error.format());
+    data = val.data;
+    const id = data.deviceId.toLowerCase();
+    updateDevice(id, data);
+    saveDevicesSafe();
+    if (devices[id]) pushUpdateToAll(devices[id]);
+    res.sendStatus(200);
 }));
 
-let devices = {};
-let geofences = [];
-let lastPushTimes = {};
+app.post(['/location/update-batch', '/v1/location/batch'], safe(async (req, res) => {
+    let batch = Buffer.isBuffer(req.body) ? (LocationBatchProto.decode(req.body).updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, { defaults: false, longs: Number }))) : req.body;
+    const val = batchSchema.safeParse(batch);
+    if (!val.success) return res.status(400).json(val.error.format());
+    batch = val.data;
+    batch.forEach(item => { const id = item.deviceId?.toLowerCase(); if (id) updateDevice(id, item); });
+    saveDevicesSafe();
+    if (batch.length > 0 && batch[0].deviceId) { const up = devices[batch[0].deviceId.toLowerCase()]; if (up) pushUpdateToAll(up); }
+    res.sendStatus(200);
+}));
 
-// 1. Debounced Persistence
-let saveTimer = null;
-let savePending = false;
+app.get(['/devices', '/v1/devices'], safe((req, res) => {
+    const list = Object.values(devices || {});
+    if (req.headers['accept']?.includes('application/x-protobuf')) {
+        return res.setHeader('Content-Type', 'application/x-protobuf').send(DeviceListProto.encode(DeviceListProto.create({ devices: list.map(d => mapAppToProto(d)) })).finish());
+    }
+    res.json(list);
+}));
 
-async function atomicWrite(file, data) {
-    const tmp = file + '.tmp';
-    await fs.writeFile(tmp, data);
-    await fs.rename(tmp, file);
-}
+app.get(['/devices/:id', '/v1/devices/:id'], safe((req, res) => {
+    const d = devices?.[req.params.id.toLowerCase()];
+    if (!d) return res.sendStatus(404);
+    if (req.headers['accept']?.includes('application/x-protobuf')) {
+        return res.setHeader('Content-Type', 'application/x-protobuf').send(DeviceLocationProto.encode(DeviceLocationProto.create(mapAppToProto(d))).finish());
+    }
+    res.json(d);
+}));
 
-function saveDevicesSafe(opts = { immediate: false }) {
-    savePending = true;
+app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], safe(async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const d = devices?.[id];
+    if (!d) return res.sendStatus(404);
+    d.alarmActive = req.query.active === 'true';
+    saveDevicesSafe({ immediate: true });
+    pushUpdateToAll(d);
 
-    if (opts.immediate) {
-        if (saveTimer) clearTimeout(saveTimer);
-        saveTimer = null;
-        savePending = false;
-        return atomicWrite(DATA_FILE, JSON.stringify(devices, null, 2))
-            .then(() => console.log(`🔥 Critical state flushed to disk.`))
-            .catch(e => console.error("Critical Save Error:", e));
+    const helpersPayload = { type: 'alarm', deviceId: id, message: `${d.name || id} braucht Hilfe!`, deviceName: d.name || id };
+
+    // --- 🛡️ SAFE BROADCAST TO HELPERS ---
+    Object.values(devices).forEach(target => {
+        if (target.fcmToken && target.deviceId !== id && target.deviceId !== req.query.triggererId?.toLowerCase()) {
+            admin.messaging().send({ data: helpersPayload, token: target.fcmToken })
+                .catch(e => console.warn(`⚠️ Helper FCM failed for ${target.deviceId}:`, e.message));
+        }
+    });
+
+    // --- 🛡️ SAFE DIRECT ALARM TO TARGET ---
+    if (d.alarmActive && d.fcmToken) {
+        admin.messaging().send({
+            data: { ...helpersPayload, message: "Fernauslösung: Alarm aktiviert!" },
+            token: d.fcmToken,
+            android: { priority: 'high' }
+        }).catch(e => console.warn(`⚠️ Direct Alarm FCM failed for ${id}:`, e.message));
     }
 
-    if (saveTimer) return; // Bereits ein Debounce aktiv
+    io.to(id).emit('command', { deviceId: id, action: d.alarmActive ? 'START_ALARM' : 'STOP_ALARM' });
+    res.sendStatus(200);
+}));
 
-    saveTimer = setTimeout(async () => {
-        saveTimer = null;
-        if (!savePending) return;
-        savePending = false;
+app.post(['/devices/:id/watch', '/v1/devices/:id/watch'], safe(async (req, res) => {
+    const d = devices?.[req.params.id.toLowerCase()];
+    if (!d) return res.sendStatus(404);
+    d.isWatched = true; d.watcherName = req.query.watcherName || "Jemand";
+
+    if (d.fcmToken) {
+        admin.messaging().send({
+            data: { type: 'watch_state', state: 'true', watcherName: d.watcherName, targetId: d.deviceId },
+            token: d.fcmToken,
+            android: { priority: 'high' }
+        }).catch(e => console.warn(`⚠️ Watch Notification failed:`, e.message));
+    }
+    res.sendStatus(200);
+}));
+
+app.post(['/devices/:id/unwatch', '/v1/devices/:id/unwatch'], safe(async (req, res) => {
+    const d = devices?.[req.params.id.toLowerCase()];
+    if (!d) return res.sendStatus(404);
+    d.isWatched = false; delete d.watcherName;
+
+    if (d.fcmToken) {
+        admin.messaging().send({
+            data: { type: 'watch_state', state: 'false' },
+            token: d.fcmToken
+        }).catch(e => console.warn(`⚠️ Unwatch Notification failed:`, e.message));
+    }
+    res.sendStatus(200);
+}));
+
+app.get(['/geofences', '/v1/geofences'], safe((req, res) => res.json(geofences || [])));
+app.post(['/geofences', '/v1/geofences'], safe(async (req, res) => {
+    if (!req.body?.id) return res.sendStatus(400);
+    geofences = (geofences || []).filter(item => item.id !== req.body.id);
+    geofences.push(req.body);
+    await queueWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    broadcastGeofenceReload(); res.sendStatus(200);
+}));
+
+app.delete(['/geofences/:id', '/v1/geofences/:id'], safe(async (req, res) => {
+    geofences = (geofences || []).filter(item => item.id !== req.params.id);
+    await queueWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    broadcastGeofenceReload(); res.sendStatus(200);
+}));
+
+// --- PERSISTENCE ---
+let writeQueue = Promise.resolve();
+function queueWrite(file, data) {
+    writeQueue = writeQueue.then(async () => {
         try {
-            await atomicWrite(DATA_FILE, JSON.stringify(devices, null, 2));
-            console.log(`💾 Devices saved to disk.`);
+            const tmp = file + '.tmp';
+            await fs.writeFile(tmp, data); await fs.rename(tmp, file);
         } catch (e) {
-            console.error("Save Error:", e);
+            console.error(`💾 WRITE ERROR [${file}]:`, e.message);
         }
-    }, 2000); // 2 Sekunden Debounce
+    });
+    return writeQueue;
+}
+
+let saveTimer = null; let savePending = false;
+function saveDevicesSafe(opts = { immediate: false }) {
+    savePending = true;
+    if (!opts.immediate && !opts.forceSave) return;
+    if (opts.immediate) {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = null; savePending = false;
+        return queueWrite(DATA_FILE, JSON.stringify(devices, null, 2)).then(() => console.log("🔥 Critical Flush"));
+    }
+    if (saveTimer) return;
+    saveTimer = setTimeout(async () => {
+        saveTimer = null; if (!savePending) return; savePending = false;
+        await queueWrite(DATA_FILE, JSON.stringify(devices, null, 2)); console.log("💾 Saved");
+    }, 2000);
 }
 
 async function init() {
     try {
-        devices = JSON.parse(await fs.readFile(DATA_FILE, 'utf8'));
-        for (const id in devices) {
-            const d = devices[id];
-            if (typeof d.timestamp === 'object' || d.timestamp < 0) {
-                d.timestamp = Date.now();
-            }
-        }
-    } catch (e) { devices = {}; }
-    try { geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8')); } catch (e) { geofences = []; }
+        const raw = await fs.readFile(DATA_FILE, 'utf8');
+        devices = JSON.parse(raw);
+    } catch (e) {
+        console.warn("⚠️ devices.json load failed, using empty state:", e.message);
+        devices = {};
+    }
+    try {
+        const rawGf = await fs.readFile(GEOFENCE_FILE, 'utf8');
+        geofences = JSON.parse(rawGf);
+    } catch (e) {
+        console.warn("⚠️ geofences.json load failed, using empty state:", e.message);
+        geofences = [];
+    }
 }
-init();
-
-setInterval(() => {
-    const now = Date.now();
-    let changed = false;
-
-    for (const id in devices) {
-        if (devices[id].status !== 'offline' && (now - devices[id].lastSeen > 120000)) {
-            devices[id].status = 'offline';
-            io.to(id).emit('location_update', devices[id]);
-            changed = true;
-        }
-    }
-
-    // Cleanup alte lastPushTimes
-    for (const key in lastPushTimes) {
-        if (now - lastPushTimes[key] > 86400000) {
-            delete lastPushTimes[key];
-        }
-    }
-
-    // 🔥 AUTOMATIC CLEANUP: Lösche Geräte, die länger als 30 Tage offline sind
-    for (const id in devices) {
-        if (now - (devices[id].lastSeen || 0) > 30 * 86400000) {
-            console.log(`🧹 Permanent removing stale device: ${id}`);
-            delete devices[id];
-            changed = true;
-        }
-    }
-
-    if (changed) saveDevicesSafe();
-}, 30000);
 
 function updateDevice(id, data) {
-    // 4. Input Sanitization & Validation
-    if (data.lat !== undefined && data.lon !== undefined) {
-        if (typeof data.lat !== 'number' || typeof data.lon !== 'number' ||
-            data.lat < -90 || data.lat > 90 || data.lon < -180 || data.lon > 180) {
-            console.warn(`⚠️ Ungültige Koordinaten für ${id}: ${data.lat}, ${data.lon}`);
-            return;
-        }
-    }
-
     const old = devices[id] || {};
+    if (data.timestamp < old.timestamp) return;
+    const alarmActive = (old.alarmActive && !data.alarmActive && Date.now() - (old.lastSeen || 0) < 30000) ? true : data.alarmActive;
+    if (data.battery !== undefined && data.battery !== old.battery) console.log(`🔋 ${id}: ${old.battery ?? 'new'} -> ${data.battery}%`);
 
-    // 🔥 RACE CONDITION PROTECTION: Nur neuere Daten akzeptieren
-    if (data.timestamp && old.timestamp && data.timestamp < old.timestamp) {
-        console.log(`🛡️ Blocked stale update for ${id} (Incoming: ${data.timestamp} < Current: ${old.timestamp})`);
-        return;
-    }
-
-    let alarmActive = data.alarmActive;
-    if (old.alarmActive === true && data.alarmActive === false) {
-        // 🔥 FIX: Nur wenn das letzte Update SEHR ALT war (> 30s),
-        // koennte es ein "stale" Punkt sein, der einen neuen Alarm loescht.
-        if (Date.now() - (old.lastSeen || 0) > 30000) alarmActive = true;
-    }
-
-    let accident = data.accident;
-    if (old.accident === true && data.accident === false) {
-        if (Date.now() - (old.lastSeen || 0) > 30000) accident = true;
-    }
-
-    // WHITELIST MERGE (Sicherheit gegen Pollution)
-    if (data.battery !== undefined && data.battery !== old.battery) {
-        console.log(`🔋 Battery Update for ${id}: ${old.battery}% -> ${data.battery}%`);
-    }
-
-    // --- 1. KOMBINIERTER ZUSTAND (Erhalt von Watch-Status und Token) ---
-    const sanitized = {
-        deviceId: id,
-        name: data.name || old.name,
-        lat: data.lat ?? old.lat,
-        lon: data.lon ?? old.lon,
-        battery: data.battery ?? old.battery,
-        speed: data.speed ?? old.speed,
-        bearing: data.bearing ?? old.bearing,
-        timestamp: data.timestamp || old.timestamp || Date.now(),
-        accuracy: data.accuracy ?? old.accuracy,
-        fcmToken: data.fcmToken || data.fcm_token || old.fcmToken,
-        snappedLat: data.snappedLat ?? old.snappedLat,
-        snappedLon: data.snappedLon ?? old.snappedLon,
-        visualLat: data.visualLat ?? old.visualLat,
-        visualLon: data.visualLon ?? old.visualLon,
-        motionState: data.motionState || old.motionState,
+    devices[id] = {
+        ...old, ...data, deviceId: id,
         alarmActive: alarmActive ?? old.alarmActive ?? false,
-        accident: accident ?? old.accident ?? false,
-        isLocked: data.isLocked ?? old.isLocked ?? false,
-        isMotion: data.isMotion ?? old.isMotion ?? false,
-        isWifi: data.isWifi ?? old.isWifi ?? false,
-
-        // 🔥 KRITISCH: Diese Felder müssen erhalten bleiben!
-        isWatched: old.isWatched || (data.isWatched ?? false),
-        watcherName: old.watcherName || data.watcherName,
-
-        status: 'online',
-        lastSeen: Date.now()
+        status: 'online', lastSeen: Date.now()
     };
-
-    devices[id] = sanitized;
-    delete devices[id].geofenceEvent;
-    handleEvents(id, { ...sanitized, geofenceEvent: data.geofenceEvent }, old);
+    handleEvents(id, { ...devices[id], geofenceEvent: data.geofenceEvent }, old);
 }
 
 async function handleEvents(id, data, old) {
-    const now = Date.now();
-    const device = devices[id];
-    if (!device) return;
-
-    // 🔥 STRENGE PRÜFUNG: Nur echte Geofence-Events (enter:X oder exit:X) verarbeiten.
-    // Dies verhindert falsche Benachrichtigungen durch Heartbeats (asc_heartbeat, sync_heartbeat etc.).
-    const isGeofence = typeof data.geofenceEvent === 'string' &&
-                      (data.geofenceEvent.startsWith('enter:') || data.geofenceEvent.startsWith('exit:'));
-
-    if (isGeofence) {
+    const device = devices[id]; if (!device) return;
+    if (typeof data.geofenceEvent === 'string' && (data.geofenceEvent.startsWith('enter:') || data.geofenceEvent.startsWith('exit:'))) {
         const key = `gf:${id}:${data.geofenceEvent}`;
-        // Cooldown auf 120s erhöht, um GPS-Jitter an Grenzen zu dämpfen.
-        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 120000)) {
-            lastPushTimes[key] = now;
-            const parts = data.geofenceEvent.split(':');
-            const action = parts[0];
-            const zoneName = parts.slice(1).join(':') || 'Zone';
 
-            await broadcast(id, {
-                type: 'geofence_event',
-                deviceId: id,
-                zoneName: zoneName,
-                deviceName: device.name || id,
-                action: action === 'enter' ? 'betreten' : 'verlassen'
-            });
+        // --- 🛡️ MEMORY PROTECTION: Clear old lastPushTimes if too large ---
+        if (Object.keys(lastPushTimes).length > 5000) {
+            console.log("🧹 Clearing lastPushTimes (Memory Protection)");
+            lastPushTimes = {};
         }
-    }
 
-    if (data.accident === true && old.accident !== true) {
-        const key = `acc:${id}`;
-        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 300000)) {
-            lastPushTimes[key] = now;
-            console.log(`🚨 ACCIDENT BROADCAST for ${id}`);
-            await broadcast(id, {
-                type: 'accident_alert',
-                deviceId: id,
-                deviceName: device.name || id,
-                user: device.name || id
-            });
-        }
-    }
-
-    if (data.alarmActive === true && old.alarmActive !== true) {
-        const key = `alarm:${id}`;
-        // 🔥 Cooldown auf 30s reduziert
-        if (!lastPushTimes[key] || (now - lastPushTimes[key] > 30000)) {
-            lastPushTimes[key] = now;
-            console.log(`🔊 ALARM BROADCAST for ${id}`);
-            await broadcast(id, {
-                type: 'alarm',
-                deviceId: id,
-                message: `${device.name || id} braucht Hilfe!`,
-                deviceName: device.name || id
-            });
+        if (Date.now() - (lastPushTimes[key] || 0) > 120000) {
+            lastPushTimes[key] = Date.now();
+            const [action, ...name] = data.geofenceEvent.split(':');
+            await broadcast(id, { type: 'geofence_event', deviceId: id, zoneName: name.join(':'), deviceName: device.name || id, action: action === 'enter' ? 'betreten' : 'verlassen' });
         }
     }
 }
 
 async function broadcast(senderId, payload) {
-    const tokens = Object.values(devices)
-        .filter(d => d.deviceId !== senderId && d.fcmToken)
-        .map(d => d.fcmToken);
-
-    if (tokens.length === 0) return;
-
-    // FIX: Firebase Multicast Limit (500 tokens)
-    const tokenChunks = [];
+    const tokens = Object.values(devices).filter(d => d.deviceId !== senderId && d.fcmToken).map(d => d.fcmToken);
     for (let i = 0; i < tokens.length; i += 500) {
-        tokenChunks.push(tokens.slice(i, i + 500));
-    }
-
-    for (const chunk of tokenChunks) {
         try {
-            const response = await admin.messaging().sendEachForMulticast({
-                data: payload,
-                tokens: chunk,
-                android: { priority: 'high' }
-            });
-
-            if (response.failureCount > 0) {
-                const failedTokens = [];
-                response.responses.forEach((resp, idx) => {
-                    if (!resp.success) {
-                        const error = resp.error;
-                        if (error.code === 'messaging/registration-token-not-registered' ||
-                            error.code === 'messaging/invalid-registration-token') {
-                            failedTokens.push(chunk[idx]);
-                        }
+            const res = await admin.messaging().sendEachForMulticast({ data: payload, tokens: tokens.slice(i, i + 500), android: { priority: 'high' } });
+            if (res.failureCount > 0) {
+                const failed = []; res.responses.forEach((r, idx) => {
+                    if (!r.success && r.error) {
+                        const code = r.error.code || "";
+                        if (code.includes('not-registered') || code.includes('invalid')) failed.push(tokens[idx]);
                     }
                 });
-
-                if (failedTokens.length > 0) {
-                    console.log(`🧹 Cleaning up ${failedTokens.length} invalid FCM tokens...`);
-                    Object.values(devices).forEach(d => {
-                        if (failedTokens.includes(d.fcmToken)) {
-                            delete d.fcmToken;
-                        }
-                    });
-                    saveDevicesSafe();
-                }
+                Object.values(devices).forEach(d => { if (failed.includes(d.fcmToken)) delete d.fcmToken; });
             }
-        } catch (e) {
-            console.error("Multicast Error:", e);
-        }
+        } catch (e) { console.error("🚨 BCast Multicast Error:", e.message); }
     }
 }
 
-app.post(['/location', '/v1/location'], async (req, res) => {
-    let data = req.body;
-    if (Buffer.isBuffer(req.body) && req.body.length > 0) {
-        try {
-            data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number }));
-        } catch (e) {
-            console.error("PROTO ERROR:", e);
-            return res.status(400).send("Protobuf Error");
-        }
-    }
-
-    // 🔥 ZOD VALIDATION
-    const result = locationSchema.safeParse(data);
-    if (!result.success) {
-        console.warn("⚠️ Validation Error:", result.error.format());
-        return res.status(400).json(result.error.format());
-    }
-    data = result.data;
-
-    const id = data.deviceId?.toLowerCase();
-    if (!id) return res.sendStatus(400);
-    updateDevice(id, data);
-    saveDevicesSafe();
-    const updated = devices[id];
-    if (updated) pushUpdateToAll(updated);
-    res.sendStatus(200);
-});
-
-app.post(['/location/update-batch', '/v1/location/batch'], async (req, res) => {
-    let batch = [];
-    if (Buffer.isBuffer(req.body) && req.body.length > 0) {
-        try {
-            const decoded = LocationBatchProto.decode(req.body);
-            batch = (decoded.updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, { defaults: false, longs: Number })));
-        } catch (e) {
-            console.error("PROTO BATCH ERROR:", e);
-            return res.status(400).send("Protobuf Batch Error");
-        }
-    } else {
-        batch = req.body;
-    }
-
-    // 🔥 ZOD VALIDATION
-    const result = batchSchema.safeParse(batch);
-    if (!result.success) {
-        return res.status(400).json(result.error.format());
-    }
-    batch = result.data;
-
-    if (!Array.isArray(batch)) return res.sendStatus(400);
-    batch.forEach(item => {
-        const id = item.deviceId?.toLowerCase();
-        if (id) updateDevice(id, item);
-    });
-    saveDevicesSafe();
-    if (batch.length > 0 && batch[0].deviceId) {
-        const firstId = batch[0].deviceId.toLowerCase();
-        const updated = devices[firstId];
-        if (updated) pushUpdateToAll(updated);
-    }
-    res.sendStatus(200);
-});
-
-app.get(['/devices', '/v1/devices'], (req, res) => {
-    const list = Object.values(devices);
-    const accept = req.headers['accept'] || '';
-    if (accept.includes('application/x-protobuf')) {
-        const protoList = list.map(d => mapAppToProto(d));
-        const buffer = DeviceListProto.encode(DeviceListProto.create({ devices: protoList })).finish();
-        res.setHeader('Content-Type', 'application/x-protobuf');
-        return res.send(buffer);
-    }
-    res.json(list);
-});
-
-app.get(['/devices/:id', '/v1/devices/:id'], (req, res) => {
-    const id = req.params.id.toLowerCase();
-    if (!devices[id]) return res.sendStatus(404);
-    const accept = req.headers['accept'] || '';
-    if (accept.includes('application/x-protobuf')) {
-        const buffer = DeviceLocationProto.encode(DeviceLocationProto.create(mapAppToProto(devices[id]))).finish();
-        res.setHeader('Content-Type', 'application/x-protobuf');
-        return res.send(buffer);
-    }
-    res.json(devices[id]);
-});
-
-app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], (req, res) => {
-    const id = req.params.id.toLowerCase();
-    const active = req.query.active === 'true';
-    const triggererId = (req.query.triggererId || "").toLowerCase(); // 🔥 NEU: Wer hat gedrückt?
-
-    if (!devices[id]) return res.sendStatus(404);
-
-    const old = { ...devices[id] };
-    devices[id].alarmActive = active;
-    saveDevicesSafe({ immediate: true });
-
-    const updated = devices[id];
-    if (updated) {
-        pushUpdateToAll(updated);
-
-        // Broadcast an alle Helfer (außer dem Absender und dem Ziel selbst)
-        const helpersPayload = {
-            type: 'alarm',
-            deviceId: id,
-            message: `${updated.name || id} braucht Hilfe!`,
-            deviceName: updated.name || id
-        };
-
-        Object.values(devices).forEach(d => {
-            if (d.fcmToken && d.deviceId !== id && d.deviceId !== triggererId) {
-                admin.messaging().send({ data: helpersPayload, token: d.fcmToken }).catch(() => {});
-            }
+async function startServer() {
+    try {
+        await initFirebase(); await init();
+        server.listen(PORT, () => console.log(`🚀 GPS Server Port ${PORT}`));
+        grpcServer.bindAsync(`0.0.0.0:${GRPC_PORT}`, grpc.ServerCredentials.createInsecure(), (err, p) => {
+            if (!err) console.log(`📡 gRPC Port ${p}`);
         });
-
-        // Direkter Push an das ZIEL-GERÄT (Nicole)
-        if (active && updated.fcmToken) {
-            admin.messaging().send({
-                data: {
-                    type: 'alarm',
-                    deviceId: id,
-                    message: `Fernauslösung: Alarm wurde aktiviert!`,
-                    deviceName: updated.name || id
-                },
-                token: updated.fcmToken,
-                android: { priority: 'high' }
-            }).catch(e => console.error("Direct Alarm Push Error:", e));
-        }
-    }
-
-    io.to(id).emit('command', { deviceId: id, action: active ? 'START_ALARM' : 'STOP_ALARM' });
-    res.sendStatus(200);
-});
-
-app.post(['/devices/:id/watch', '/v1/devices/:id/watch'], (req, res) => {
-    const id = req.params.id.toLowerCase();
-    const watcherId = req.query.watcherId;
-    const watcherName = req.query.watcherName || "Jemand";
-
-    if (!devices[id]) return res.sendStatus(404);
-
-    devices[id].isWatched = true;
-    devices[id].watcherName = watcherName;
-
-    if (devices[id].fcmToken) {
-        admin.messaging().send({
-            data: {
-                type: 'watch_state',
-                state: 'true',
-                watcherName: watcherName,
-                targetId: id
-            },
-            token: devices[id].fcmToken,
-            android: { priority: 'high' }
-        }).catch(() => {});
-    }
-
-    res.sendStatus(200);
-});
-
-app.post(['/devices/:id/unwatch', '/v1/devices/:id/unwatch'], (req, res) => {
-    const id = req.params.id.toLowerCase();
-    if (!devices[id]) return res.sendStatus(404);
-
-    devices[id].isWatched = false;
-    delete devices[id].watcherName;
-
-    if (devices[id].fcmToken) {
-        admin.messaging().send({
-            data: { type: 'watch_state', state: 'false' },
-            token: devices[id].fcmToken
-        }).catch(() => {});
-    }
-    res.sendStatus(200);
-});
-
-app.post(['/devices/:id/wakeup', '/v1/devices/:id/wakeup'], (req, res) => {
-    const id = req.params.id.toLowerCase();
-    const watcherName = req.query.watcherName || "Zentrale";
-    if (!devices[id]) return res.sendStatus(404);
-
-    if (devices[id].fcmToken) {
-        admin.messaging().send({
-            data: { type: 'wakeup', watcherName: watcherName },
-            token: devices[id].fcmToken,
-            android: { priority: 'high' }
-        }).catch(() => {});
-    }
-    res.sendStatus(200);
-});
-
-app.get(['/geofences', '/v1/geofences'], (req, res) => res.json(geofences));
-
-app.post(['/geofences', '/v1/geofences'], async (req, res) => {
-    const gf = req.body;
-    if (!gf || !gf.id) return res.sendStatus(400);
-    geofences = geofences.filter(item => item.id !== gf.id);
-    geofences.push(gf);
-    await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
-    broadcastGeofenceReload();
-    res.sendStatus(200);
-});
-
-app.put(['/geofences/:id', '/v1/geofences/:id'], async (req, res) => {
-    const id = req.params.id;
-    const gf = req.body;
-    if (!gf.id) gf.id = id;
-    geofences = geofences.filter(item => item.id !== id);
-    geofences.push(gf);
-    await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
-    broadcastGeofenceReload();
-    res.sendStatus(200);
-});
-
-app.delete(['/geofences/:id', '/v1/geofences/:id'], async (req, res) => {
-    const id = req.params.id;
-    geofences = geofences.filter(item => item.id !== id);
-    await atomicWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
-    broadcastGeofenceReload();
-    res.sendStatus(200);
-});
-
-app.post(['/location/clear/:id', '/v1/location/clear/:id'], (req, res) => {
-    const id = req.params.id.toLowerCase();
-    delete devices[id];
-    saveDevicesSafe();
-    res.sendStatus(200);
-});
-
-app.post(['/devices/wakeup-all', '/v1/devices/wakeup-all'], (req, res) => {
-    Object.values(devices).forEach(d => {
-        if (d.fcmToken) {
-            admin.messaging().send({
-                data: { type: 'wakeup', watcherName: "Zentrale (Broadcast)" },
-                token: d.fcmToken,
-                android: { priority: 'high' }
-            }).catch(() => {});
-        }
-    });
-    res.sendStatus(200);
-});
-
-server.listen(PORT, () => console.log(`🚀 GPS Server online on Port ${PORT}`));
-
-grpcServer.bindAsync(`0.0.0.0:${GRPC_PORT}`, grpc.ServerCredentials.createInsecure(), (err, port) => {
-    if (err) {
-        console.error("❌ gRPC Bind Error:", err);
-        // Falls der gRPC Port belegt ist oder auf Render Probleme macht,
-        // stürzen wir nicht ab, damit Express weiterläuft.
-    } else {
-        console.log(`📡 gRPC Server online on Port ${port}`);
-    }
-});
+    } catch (e) { console.error("💥 FATAL:", e); process.exit(1); }
+}
+startServer();
