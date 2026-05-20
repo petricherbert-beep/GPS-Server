@@ -370,6 +370,22 @@ app.post(['/devices/:id/unwatch', '/v1/devices/:id/unwatch'], safe(async (req, r
     res.sendStatus(200);
 }));
 
+app.post(['/devices/:id/break-lock', '/v1/devices/:id/break-lock'], safe(async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const d = devices?.[id];
+    if (!d) return res.sendStatus(404);
+
+    if (d.fcmToken) {
+        admin.messaging().send({
+            data: { type: 'break_lock', deviceId: id },
+            token: d.fcmToken,
+            android: { priority: 'high' }
+        }).then(() => console.log(`🔓 Break Lock sent to ${id}`))
+          .catch(e => console.warn(`⚠️ Break Lock FCM failed for ${id}:`, e.message));
+    }
+    res.sendStatus(200);
+}));
+
 app.get(['/geofences', '/v1/geofences'], safe((req, res) => res.json(geofences || [])));
 app.post(['/geofences', '/v1/geofences'], safe(async (req, res) => {
     if (!req.body?.id) return res.sendStatus(400);
