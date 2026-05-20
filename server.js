@@ -457,6 +457,10 @@ function updateDevice(id, data) {
     const name = data.name || old.name;
 
     const alarmActive = (old.alarmActive && !data.alarmActive && Date.now() - (old.lastSeen || 0) < 30000) ? true : data.alarmActive;
+
+    // 🔥 BATTERY PROTECTION: Don't overwrite with 0 or null if we have an old value
+    const battery = (data.battery > 0) ? data.battery : (old.battery || 0);
+
     if (data.battery !== undefined && data.battery !== old.battery) console.log(`🔋 ${id}: ${old.battery ?? 'new'} -> ${data.battery}%`);
 
     const isRealGeofence = typeof data.geofenceEvent === 'string' && (data.geofenceEvent.startsWith('enter:') || data.geofenceEvent.startsWith('exit:'));
@@ -465,6 +469,7 @@ function updateDevice(id, data) {
         ...old, ...data, deviceId: id,
         fcmToken: fcmToken,
         name: name,
+        battery: battery,
         geofenceEvent: isRealGeofence ? data.geofenceEvent : undefined,
         alarmActive: alarmActive ?? old.alarmActive ?? false,
         status: 'online', lastSeen: Date.now()
