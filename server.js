@@ -450,9 +450,16 @@ async function init() {
 
 function updateDevice(id, data) {
     const old = devices[id] || {};
-    if (data.timestamp < old.timestamp) return;
+    // 🔥 DATA PROTECTION: Don't overwrite with older data, but merge metadata
+    if (data.timestamp < old.timestamp) {
+        // Even if the point is old, we might have new metadata (like a fresh FCM token)
+        if (data.fcmToken && data.fcmToken !== old.fcmToken) {
+            devices[id].fcmToken = data.fcmToken;
+        }
+        return;
+    }
 
-    // 🔥 TOKEN PROTECTION: Don't overwrite with empty values
+    // 🔥 FIELD PROTECTION: Ensure critical fields are never zeroed/nulled
     const fcmToken = (data.fcmToken || data.fcm_token) || old.fcmToken;
     const name = data.name || old.name;
 
@@ -465,6 +472,7 @@ function updateDevice(id, data) {
 
     const isRealGeofence = typeof data.geofenceEvent === 'string' && (data.geofenceEvent.startsWith('enter:') || data.geofenceEvent.startsWith('exit:'));
 
+    // 🔥 PERSISTENCE: Nicole and Oliver are NEVER removed from this map
     devices[id] = {
         ...old, ...data, deviceId: id,
         fcmToken: fcmToken,
