@@ -418,17 +418,26 @@ function queueWrite(file, data) {
 let saveTimer = null; let savePending = false;
 function saveDevicesSafe(opts = { immediate: false }) {
     savePending = true;
-    if (!opts.immediate && !opts.forceSave) return;
-    if (opts.immediate) {
+
+    // 1. SOFORT-MODUS: Bei Alarmen oder kritischen Statusänderungen
+    if (opts.immediate || opts.forceSave) {
         if (saveTimer) clearTimeout(saveTimer);
-        saveTimer = null; savePending = false;
-        return queueWrite(DATA_FILE, JSON.stringify(devices, null, 2)).then(() => console.log("🔥 Critical Flush"));
+        saveTimer = null;
+        savePending = false;
+        return queueWrite(DATA_FILE, JSON.stringify(devices, null, 2))
+            .then(() => console.log("🔥 Critical Flush: Data persisted immediately."));
     }
-    if (saveTimer) return;
+
+    // 2. DEBOUNCED-MODUS: Normales Sammeln von Updates
+    if (saveTimer) return; // Timer läuft bereits, wird nach Ablauf prüfen
+
     saveTimer = setTimeout(async () => {
-        saveTimer = null; if (!savePending) return; savePending = false;
-        await queueWrite(DATA_FILE, JSON.stringify(devices, null, 2)); console.log("💾 Saved");
-    }, 2000);
+        saveTimer = null;
+        if (!savePending) return;
+        savePending = false;
+        await queueWrite(DATA_FILE, JSON.stringify(devices, null, 2));
+        console.log("💾 Periodic Save: Device state persisted.");
+    }, 10000); // 10s Puffer für normale Updates
 }
 
 async function init() {
@@ -450,16 +459,9 @@ async function init() {
 
 function updateDevice(id, data) {
     const old = devices[id] || {};
-    // 🔥 DATA PROTECTION: Don't overwrite with older data, but merge metadata
-    if (data.timestamp < old.timestamp) {
-        // Even if the point is old, we might have new metadata (like a fresh FCM token)
-        if (data.fcmToken && data.fcmToken !== old.fcmToken) {
-            devices[id].fcmToken = data.fcmToken;
-        }
-        return;
-    }
+    if (data.timestamp < old.timestamp) return;
 
-    // 🔥 FIELD PROTECTION: Ensure critical fields are never zeroed/nulled
+    // 🔥 TOKEN PROTECTION: Don't overwrite with empty values
     const fcmToken = (data.fcmToken || data.fcm_token) || old.fcmToken;
     const name = data.name || old.name;
 
@@ -472,7 +474,6 @@ function updateDevice(id, data) {
 
     const isRealGeofence = typeof data.geofenceEvent === 'string' && (data.geofenceEvent.startsWith('enter:') || data.geofenceEvent.startsWith('exit:'));
 
-    // 🔥 PERSISTENCE: Nicole and Oliver are NEVER removed from this map
     devices[id] = {
         ...old, ...data, deviceId: id,
         fcmToken: fcmToken,
