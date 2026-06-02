@@ -431,6 +431,22 @@ app.post(['/devices/:id/unwatch', '/v1/devices/:id/unwatch'], safe(async (req, r
     res.sendStatus(200);
 }));
 
+app.post(['/devices/:id/wakeup', '/v1/devices/:id/wakeup'], safe(async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const d = devices?.[id];
+    if (!d) return res.sendStatus(404);
+
+    if (d.fcmToken) {
+        admin.messaging().send({
+            data: { type: 'wakeup', deviceId: id },
+            token: d.fcmToken,
+            android: { priority: 'high' }
+        }).then(() => log("info", `📱 Wakeup sent to ${id}`))
+          .catch(e => log("error", `⚠️ Wakeup FCM failed for ${id}:`, e.message));
+    }
+    res.sendStatus(200);
+}));
+
 app.post(['/devices/:id/break-lock', '/v1/devices/:id/break-lock'], safe(async (req, res) => {
     const id = req.params.id.toLowerCase();
     const d = devices?.[id];
