@@ -463,6 +463,18 @@ app.post(['/devices/:id/break-lock', '/v1/devices/:id/break-lock'], safe(async (
     res.sendStatus(200);
 }));
 
+app.post(['/devices/wakeup-all', '/v1/devices/wakeup-all'], safe(async (req, res) => {
+    log("info", "📣 Global Wakeup requested");
+    await broadcast(null, { type: 'wakeup' });
+    res.sendStatus(200);
+}));
+
+app.post(['/location/clear/:id', '/v1/location/clear/:id'], safe(async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    log("info", `🧹 History cleared for ${id}`);
+    res.sendStatus(200);
+}));
+
 app.get(['/geofences', '/v1/geofences'], safe((req, res) => res.json(geofences || [])));
 app.post(['/geofences', '/v1/geofences'], safe(async (req, res) => {
     if (!req.body?.id) return res.sendStatus(400);
