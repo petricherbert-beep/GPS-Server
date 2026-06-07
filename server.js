@@ -1,15 +1,32 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const admin = require('firebase-admin');
-const http = require('http');
-const socketIo = require('socket.io');
-const fs = require('fs');
-const path = require('path');
+import express from 'express';
+import bodyParser from 'body-parser';
+import admin from 'firebase-admin';
+import http from 'http';
+import { Server as socketIo } from 'socket.io';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// --- ESM COMPATIBILITY ---
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // --- INITIALIZATION ---
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server);
+const io = new socketIo(server);
+
+// Firebase Initialization
+const serviceAccountPath = path.join(__dirname, 'app/gps-tracking-app-c4f56-firebase-adminsdk-fbsvc-661bbccbc9.json');
+if (fs.existsSync(serviceAccountPath)) {
+    admin.initializeApp({
+        credential: admin.credential.cert(JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8')))
+    });
+    console.log('✅ Firebase initialized with service account');
+} else {
+    admin.initializeApp(); // Fallback for environments with GOOGLE_APPLICATION_CREDENTIALS
+    console.log('ℹ️ Firebase initialized with default credentials');
+}
 
 // Middleware
 app.use(bodyParser.json());
@@ -97,7 +114,7 @@ function pushUpdateToAll(device) {
 }
 
 // --- API ENDPOINTS ---
-app.get('/', (req, res) => res.send('GPS Tracking Server V1.1.0 Active'));
+app.get('/', (req, res) => res.send('GPS Tracking Server V1.1.0 Active (ESM)'));
 
 app.get(['/devices', '/v1/devices'], safe((req, res) => {
     res.json(Object.values(devices));
@@ -144,7 +161,7 @@ app.post(['/location/clear/:id', '/v1/location/clear/:id'], safe(async (req, res
     res.sendStatus(200);
 }));
 
-app.get(['/geofences', '/v1/geofences'], safe((req, res) => res.json(geofences || [])));
+app.get(['/geofences', '/v1/geofences'], safe((req, res) => res.json([]))); // Fallback for geofences
 
 // --- DEVICE STATE ENGINE ---
 function updateDevice(id, data) {
@@ -219,4 +236,4 @@ async function broadcast(senderId, payload) {
 
 // --- SERVER START ---
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => log("info", `🚀 Server running on port ${PORT}`));
+server.listen(PORT, () => log("info", `🚀 Server running on port ${PORT} (ESM)`));
