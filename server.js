@@ -218,14 +218,14 @@ app.post('/v1/location/batch', safe(async (req, res) => {
 app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], safe(async (req, res) => {
     const id = req.params.id.toLowerCase();
     const active = req.query.active === 'true';
-    log("info", `🔔 Alarm ${active ? 'ON' : 'OFF'} requested for ${id}`);
+    log("info", `🔔 Remote Alarm ${active ? 'ON' : 'OFF'} requested for ${id}`);
     await broadcast(null, { type: 'alarm', active: active.toString(), deviceId: id });
     res.sendStatus(200);
 }));
 
 app.post(['/devices/:id/wakeup', '/v1/devices/:id/wakeup'], safe(async (req, res) => {
     const id = req.params.id.toLowerCase();
-    log("info", `⚡ Wakeup requested for ${id}`);
+    log("info", `⚡ Remote Wakeup requested for ${id}`);
     await broadcast(null, { type: 'wakeup', deviceId: id });
     res.sendStatus(200);
 }));
@@ -233,7 +233,7 @@ app.post(['/devices/:id/wakeup', '/v1/devices/:id/wakeup'], safe(async (req, res
 app.post(['/devices/:id/watch', '/v1/devices/:id/watch'], safe(async (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId;
-    log("info", `👀 Watch started for ${id} by ${watcherId}`);
+    log("info", `👀 Remote Watch started for ${id} by ${watcherId}`);
     await broadcast(id, { type: 'watch_start', watcherId: watcherId });
     res.sendStatus(200);
 }));
@@ -241,7 +241,7 @@ app.post(['/devices/:id/watch', '/v1/devices/:id/watch'], safe(async (req, res) 
 app.post(['/devices/:id/unwatch', '/v1/devices/:id/unwatch'], safe(async (req, res) => {
     const id = req.params.id.toLowerCase();
     const watcherId = req.query.watcherId;
-    log("info", `🙈 Watch stopped for ${id} by ${watcherId}`);
+    log("info", `🙈 Remote Watch stopped for ${id} by ${watcherId}`);
     await broadcast(id, { type: 'watch_stop', watcherId: watcherId });
     res.sendStatus(200);
 }));
