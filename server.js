@@ -25,11 +25,13 @@ const io = new socketIo(server);
 // Firebase Initialization
 const serviceAccountPath = path.join(__dirname, 'app/gps-tracking-app-c4f56-firebase-adminsdk-fbsvc-661bbccbc9.json');
 if (fs.existsSync(serviceAccountPath)) {
+    console.log(`✅ Found service account at: ${serviceAccountPath}`);
     admin.initializeApp({
         credential: admin.credential.cert(JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8')))
     });
     console.log('✅ Firebase initialized with service account');
 } else {
+    console.warn(`⚠️ Service account NOT found at: ${serviceAccountPath}`);
     admin.initializeApp();
     console.log('ℹ️ Firebase initialized with default credentials');
 }
