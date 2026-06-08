@@ -1,88 +1,98 @@
 import express from 'express';
-import bodyParser from 'body-parser';
-import admin from 'firebase-admin';
 import http from 'http';
-import { Server as socketIo } from 'socket.io';
-import fs from 'fs';
+import cors from 'cors';
+import { Server } from 'socket.io';
+import bodyParser from 'body-parser';
+import fs from 'fs/promises';
+import admin from 'firebase-admin';
+import protobuf from 'protobufjs';
+import grpc from '@grpc/grpc-js';
+import protoLoader from '@grpc/proto-loader';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import protobuf from 'protobufjs';
+import rateLimit from 'express-rate-limit';
 
-// --- ESM COMPATIBILITY ---
+import compression from 'compression';
+import { z } from 'zod';
+
+// --- 🧱 TOP-LEVEL CRASH PROTECTION ---
+process.on("uncaughtException", (err) => {
+    console.error("💥 UNCAUGHT EXCEPTION:", err);
+});
+
+process.on("unhandledRejection", (err) => {
+    console.error("💥 UNHANDLED PROMISE REJECTION:", err);
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// --- PROTOBUF SETUP ---
-const root = await protobuf.load(path.join(__dirname, 'tracking.proto'));
-const LocationUpdateProto = root.lookupType('tracking.LocationUpdateProto');
-const LocationBatchProto = root.lookupType('tracking.LocationBatchProto');
-
-// --- INITIALIZATION ---
-const app = express();
-const server = http.createServer(app);
-const io = new socketIo(server);
-
-// Firebase Initialization
-const serviceAccountPath = path.join(__dirname, 'app/gps-tracking-app-c4f56-firebase-adminsdk-fbsvc-661bbccbc9.json');
-if (fs.existsSync(serviceAccountPath)) {
-    console.log(`✅ Found service account at: ${serviceAccountPath}`);
-    admin.initializeApp({
-        credential: admin.credential.cert(JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8')))
-    });
-    console.log('✅ Firebase initialized with service account');
-} else {
-    console.warn(`⚠️ Service account NOT found at: ${serviceAccountPath}`);
-    admin.initializeApp();
-    console.log('ℹ️ Firebase initialized with default credentials');
+// --- STRENGE KONFIGURATION ---
+if (!process.env.API_KEY) {
+    console.error("❌ KRITISCH: API_KEY fehlt! Server-Start abgebrochen.");
+    process.exit(1);
 }
+const API_KEY = process.env.API_KEY;
+const PORT = process.env.PORT || 3000;
+const GRPC_PORT = process.env.GRPC_PORT || 50051;
+const DATA_FILE = path.join(__dirname, 'devices.json');
+const GEOFENCE_FILE = path.join(__dirname, 'geofences.json');
 
-// 🔥 PRODUCTION GRADE MIDDLEWARE (Hybrid)
-// 1. Protobuf/Binary Layer
-app.use(bodyParser.raw({
-    type: (req) => {
-        const ct = req.headers['content-type'] || '';
-        return ct.includes('protobuf') || ct.includes('octet-stream');
-    },
-    limit: '5mb'
-}));
+// --- PROTOBUF DEFINITION ---
+const PROTO_PATH = path.join(__dirname, 'tracking.proto');
+const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
+    keepCase: true,
+    longs: Number,
+    enums: String,
+    defaults: false,
+    oneofs: true
+});
+const trackingProto = grpc.loadPackageDefinition(packageDefinition).tracking;
 
-// 2. JSON Layer (only if not already buffered by raw)
-app.use((req, res, next) => {
-    if (Buffer.isBuffer(req.body)) return next();
-    bodyParser.json({ limit: '1mb' })(req, res, next);
+const protoSource = await fs.readFile(PROTO_PATH, 'utf8');
+const root = protobuf.parse(protoSource).root;
+const LocationUpdateProto = root.lookupType("LocationUpdateProto");
+const LocationBatchProto = root.lookupType("LocationBatchProto");
+const DeviceLocationProto = root.lookupType("DeviceLocationProto");
+const DeviceListProto = root.lookupType("DeviceListProto");
+
+// --- SCHEMA VALIDATION ---
+const locationSchema = z.object({
+    deviceId: z.string(),
+    lat: z.number().min(-90).max(90).optional(),
+    lon: z.number().min(-180).max(180).optional(),
+    timestamp: z.number().optional(),
+    accuracy: z.number().optional(),
+    speed: z.number().optional(),
+    bearing: z.number().optional(),
+    battery: z.number().optional(),
+    fcmToken: z.string().optional(),
+    alarmActive: z.boolean().optional(),
+    accident: z.boolean().optional(),
+    isLocked: z.boolean().optional(),
+    isMotion: z.boolean().optional(),
+    isWifi: z.boolean().optional(),
+    motionState: z.string().optional(),
+    geofenceEvent: z.string().optional(),
+    name: z.string().optional()
 });
 
-app.use(bodyParser.urlencoded({ extended: true }));
+const batchSchema = z.array(locationSchema);
 
-const devices = {}; // In-memory device store
-const lastPushTimes = {};
-let geofences = [];
-
-// Load Geofences from disk
-const gfPath = path.join(__dirname, 'geofences.json');
-if (fs.existsSync(gfPath)) {
-    try {
-        geofences = JSON.parse(fs.readFileSync(gfPath, 'utf8'));
-        console.log(`✅ Loaded ${geofences.length} geofences from disk`);
-    } catch (e) {
-        console.error('❌ Failed to load geofences:', e.message);
-    }
-}
-
-// --- LOGGING ---
-function log(level, message) {
-    const ts = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    console.log(`[${ts}] ${level.toUpperCase().padEnd(7)} | ${message}`);
-}
-
-// --- HELPERS ---
-const safe = (fn) => (req, res, next) => {
+// --- 🛡️ HELPER: SAFE REQUEST WRAPPER ---
+const safe = fn => (req, res, next) =>
     Promise.resolve(fn(req, res, next)).catch(err => {
-        log("error", `API Error: ${err.message}`);
-        res.status(500).send(err.message);
+        console.error("🔥 ROUTE ERROR:", err);
+        if (!res.headersSent) res.sendStatus(500);
     });
-};
 
+// --- STATE ---
+let devices = {};
+let geofences = [];
+let lastPushTimes = {};
+const grpcStreams = new Set();
+
+// --- gRPC HELPERS ---
 function mapAppToProto(data) {
     if (!data) return data;
     const p = { ...data };
@@ -143,190 +153,324 @@ function pushUpdateToAll(device) {
         timestamp: Date.now(),
         server_response: { device: protoDevice }
     };
-    io.emit('server_response', response);
+
+    if (device.geofenceEvent && (device.geofenceEvent.startsWith('enter:') || device.geofenceEvent.startsWith('exit:'))) {
+        console.log(`🚩 GEOFENCE EVENT: ${device.deviceId} -> ${device.geofenceEvent}`);
+    }
+    if (device.alarmActive) console.log(`🔊 ALARM ACTIVE: ${device.deviceId}`);
+    if (device.accident) console.log(`🚨 ACCIDENT ALERT: ${device.deviceId}`);
+
+    for (const call of grpcStreams) {
+        try {
+            if (!call || call.destroyed) { grpcStreams.delete(call); continue; }
+            const ok = call.write(response);
+            if (!ok) {
+                call._pendingWrites = (call._pendingWrites || 0) + 1;
+                if (call._pendingWrites > 100) { call.end(); grpcStreams.delete(call); }
+            } else { call._pendingWrites = 0; }
+        } catch (e) { grpcStreams.delete(call); }
+    }
 }
 
-// --- API ENDPOINTS ---
-app.get('/', (req, res) => res.send('GPS Tracking Server V1.2.3 Active (Catch-All Raw)'));
+function broadcastGeofenceReload() {
+    for (const call of grpcStreams) {
+        try { if (!call.destroyed) call.write({ reload_geofences: true }); }
+        catch (e) { grpcStreams.delete(call); }
+    }
+}
+
+// --- FIREBASE ---
+async function initFirebase() {
+    try {
+        const envKey = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.firebase_service_account;
+        const serviceAccount = envKey ? JSON.parse(envKey) : JSON.parse(await fs.readFile(path.join(__dirname, 'firebase-key.json'), 'utf8'));
+        admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+        console.log("✅ Firebase Admin aktiv.");
+    } catch (e) { console.error("❌ Firebase Fehler:", e.message); throw e; }
+}
+
+const app = express();
+app.set('trust proxy', 1);
+app.use(compression());
+app.use(cors({ origin: "*" }));
+
+// --- 🛡️ RATE LIMITING ---
+app.use('/location', rateLimit({ windowMs: 60000, max: 2000, skipSuccessfulRequests: true }));
+app.use(['/devices', '/geofences'], rateLimit({ windowMs: 60000, max: 120 }));
+
+// --- gRPC SERVER ---
+const grpcServer = new grpc.Server();
+grpcServer.addService(trackingProto.TrackingService.service, {
+    GetDevices: (call, callback) => {
+        const meta = call.metadata.get('x-api-key');
+        if (meta?.[0] !== API_KEY) return callback({ code: grpc.status.UNAUTHENTICATED, details: "Invalid API Key" });
+        callback(null, { devices: Object.values(devices || {}) });
+    },
+    TrackLocation: (call) => {
+        const meta = call.metadata.get('x-api-key');
+        if (meta?.[0] !== API_KEY) { call.emit('error', { code: grpc.status.UNAUTHENTICATED }); return call.end(); }
+        if (grpcStreams.size >= 1000) return call.end();
+
+        call.lastActivity = Date.now();
+        grpcStreams.add(call);
+        const cleanup = () => grpcStreams.delete(call);
+        call.on('data', (event) => {
+            if (!call || call.destroyed) return;
+            call.lastActivity = Date.now();
+            const update = event.location_update;
+            if (!update) return;
+            const data = mapProtoToApp(update);
+            const id = data.deviceId?.toLowerCase();
+            if (id) {
+                for (const old of grpcStreams) { if (old !== call && old.deviceId === id) { try { old.end(); } catch {} grpcStreams.delete(old); } }
+                call.deviceId = id;
+                updateDevice(id, data);
+                saveDevicesSafe({ immediate: data.alarmActive || data.accident });
+                const updated = devices[id];
+                if (updated) pushUpdateToAll(updated);
+            }
+        });
+        call.on('end', cleanup); call.on('error', cleanup); call.on('close', cleanup);
+    }
+});
+
+// Watchdog
+setInterval(() => {
+    const now = Date.now();
+    for (const call of grpcStreams) { if (now - (call.lastActivity || 0) > 300000) { try { call.end(); } catch {} grpcStreams.delete(call); } }
+}, 60000);
+
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
+io.use((socket, next) => {
+    if ((socket.handshake.auth?.apiKey || socket.handshake.query?.apiKey) !== API_KEY) return next(new Error("Unauthorized"));
+    next();
+});
+
+io.on('connection', (socket) => {
+    socket.on('join_device', (data) => {
+        const id = (typeof data === 'string' ? data : data?.deviceId)?.toLowerCase().trim();
+        if (id) { socket.join(id); if (devices[id]) socket.emit('location_update', devices[id]); }
+    });
+});
+
+// --- REST ROUTES ---
+app.use((req, res, next) => {
+    if (req.path === '/' || req.path.startsWith('/socket.io')) return next();
+    if (req.headers['x-api-key'] !== API_KEY) return res.sendStatus(401);
+    next();
+});
+
+app.use(bodyParser.json({ limit: '200kb' }));
+app.use(bodyParser.raw({ type: 'application/x-protobuf', limit: '200kb' }));
+
+app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
+
+app.post(['/location', '/v1/location'], safe(async (req, res) => {
+    let data = req.body;
+    if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+        data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number }));
+    }
+    const val = locationSchema.safeParse(data);
+    if (!val.success) return res.status(400).json(val.error.format());
+    data = val.data;
+    const id = data.deviceId.toLowerCase();
+    updateDevice(id, data);
+    saveDevicesSafe();
+    if (devices[id]) pushUpdateToAll(devices[id]);
+    res.sendStatus(200);
+}));
+
+app.post(['/location/update-batch', '/v1/location/batch'], safe(async (req, res) => {
+    let batch = Buffer.isBuffer(req.body) ? (LocationBatchProto.decode(req.body).updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, { defaults: false, longs: Number }))) : req.body;
+    const val = batchSchema.safeParse(batch);
+    if (!val.success) return res.status(400).json(val.error.format());
+    batch = val.data;
+    batch.forEach(item => { const id = item.deviceId?.toLowerCase(); if (id) updateDevice(id, item); });
+    saveDevicesSafe();
+    if (batch.length > 0 && batch[0].deviceId) { const up = devices[batch[0].deviceId.toLowerCase()]; if (up) pushUpdateToAll(up); }
+    res.sendStatus(200);
+}));
 
 app.get(['/devices', '/v1/devices'], safe((req, res) => {
-    res.json(Object.values(devices));
+    const list = Object.values(devices || {});
+    if (req.headers['accept']?.includes('application/x-protobuf')) {
+        return res.setHeader('Content-Type', 'application/x-protobuf').send(DeviceListProto.encode(DeviceListProto.create({ devices: list.map(d => mapAppToProto(d)) })).finish());
+    }
+    res.json(list);
 }));
 
 app.get(['/devices/:id', '/v1/devices/:id'], safe((req, res) => {
-    const id = req.params.id.toLowerCase();
-    const device = devices[id];
-    if (!device) return res.status(404).send('Not found');
-    res.json(device);
-}));
-
-app.post(['/location/update', '/v1/location'], safe(async (req, res) => {
-    const contentType = req.headers['content-type'] || '';
-    const isBinary = Buffer.isBuffer(req.body) && contentType.includes('protobuf');
-
-    let data;
-    try {
-        if (isBinary) {
-            data = mapProtoToApp(LocationUpdateProto.decode(req.body));
-            log("debug", `✅ Single Decoded: ${data.deviceId} (Binary, size=${req.body.length})`);
-        } else {
-            // req.body is already a JSON object if processed by bodyParser.json
-            data = mapProtoToApp(req.body);
-            log("debug", `✅ Single Decoded: ${data.deviceId} (JSON)`);
-        }
-    } catch (e) {
-        log("error", `❌ PROTO DECODE FAILED: ${e.message} | CT: ${contentType} | Size: ${req.body?.length}`);
-        return res.status(400).send(`Decode error: ${e.message}`);
+    const d = devices?.[req.params.id.toLowerCase()];
+    if (!d) return res.sendStatus(404);
+    if (req.headers['accept']?.includes('application/x-protobuf')) {
+        return res.setHeader('Content-Type', 'application/x-protobuf').send(DeviceLocationProto.encode(DeviceLocationProto.create(mapAppToProto(d))).finish());
     }
-
-    if (!data.deviceId) return res.status(400).send('Missing deviceId');
-
-    updateDevice(data.deviceId, data);
-    pushUpdateToAll(devices[data.deviceId.toLowerCase()]);
-    res.sendStatus(200);
+    res.json(d);
 }));
-
-app.post('/v1/location/batch', safe(async (req, res) => {
-    const contentType = req.headers['content-type'] || '';
-    if (!Buffer.isBuffer(req.body) || !contentType.includes('protobuf')) {
-        log("error", `❌ Batch non-binary request. CT: ${contentType}`);
-        return res.status(400).send('Expected binary protobuf');
-    }
-
-    try {
-        const batch = LocationBatchProto.decode(req.body);
-        log("info", `📦 Received batch with ${batch.updates.length} points (Size=${req.body.length})`);
-
-        for (const update of batch.updates) {
-            const data = mapProtoToApp(update);
-            if (data.deviceId) {
-                updateDevice(data.deviceId, data);
-            }
-        }
-
-        if (batch.updates.length > 0) {
-            const last = mapProtoToApp(batch.updates[batch.updates.length - 1]);
-            pushUpdateToAll(devices[last.deviceId.toLowerCase()]);
-        }
-        res.sendStatus(200);
-    } catch (e) {
-        log("error", `❌ BATCH DECODE FAILED: ${e.message}`);
-        res.status(400).send(e.message);
-    }
-}));
-
-// --- REMOTE COMMANDS (FCM) ---
 
 app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], safe(async (req, res) => {
     const id = req.params.id.toLowerCase();
-    const active = req.query.active === 'true';
-    log("info", `🔔 Remote Alarm ${active ? 'ON' : 'OFF'} requested for ${id}`);
-    await broadcast(null, { type: 'alarm', active: active.toString(), deviceId: id });
-    res.sendStatus(200);
-}));
+    const d = devices?.[id];
+    if (!d) return res.sendStatus(404);
+    d.alarmActive = req.query.active === 'true';
+    saveDevicesSafe({ immediate: true });
+    pushUpdateToAll(d);
 
-app.post(['/devices/:id/wakeup', '/v1/devices/:id/wakeup'], safe(async (req, res) => {
-    const id = req.params.id.toLowerCase();
-    log("info", `⚡ Remote Wakeup requested for ${id}`);
-    await broadcast(null, { type: 'wakeup', deviceId: id });
+    const helpersPayload = { type: 'alarm', deviceId: id, message: `${d.name || id} braucht Hilfe!`, deviceName: d.name || id };
+
+    // --- 🛡️ SAFE BROADCAST TO HELPERS ---
+    Object.values(devices).forEach(target => {
+        if (target.fcmToken && target.deviceId !== id && target.deviceId !== req.query.triggererId?.toLowerCase()) {
+            admin.messaging().send({ data: helpersPayload, token: target.fcmToken })
+                .catch(e => console.warn(`⚠️ Helper FCM failed for ${target.deviceId}:`, e.message));
+        }
+    });
+
+    // --- 🛡️ SAFE DIRECT ALARM TO TARGET ---
+    if (d.alarmActive && d.fcmToken) {
+        admin.messaging().send({
+            data: { ...helpersPayload, message: "Fernauslösung: Alarm aktiviert!" },
+            token: d.fcmToken,
+            android: { priority: 'high' }
+        }).catch(e => console.warn(`⚠️ Direct Alarm FCM failed for ${id}:`, e.message));
+    }
+
+    io.to(id).emit('command', { deviceId: id, action: d.alarmActive ? 'START_ALARM' : 'STOP_ALARM' });
     res.sendStatus(200);
 }));
 
 app.post(['/devices/:id/watch', '/v1/devices/:id/watch'], safe(async (req, res) => {
-    const id = req.params.id.toLowerCase();
-    const watcherId = req.query.watcherId;
-    log("info", `👀 Remote Watch started for ${id} by ${watcherId}`);
-    await broadcast(id, { type: 'watch_start', watcherId: watcherId });
+    const d = devices?.[req.params.id.toLowerCase()];
+    if (!d) return res.sendStatus(404);
+    d.isWatched = true; d.watcherName = req.query.watcherName || "Jemand";
+
+    if (d.fcmToken) {
+        admin.messaging().send({
+            data: { type: 'watch_state', state: 'true', watcherName: d.watcherName, targetId: d.deviceId },
+            token: d.fcmToken,
+            android: { priority: 'high' }
+        }).catch(e => console.warn(`⚠️ Watch Notification failed:`, e.message));
+    }
     res.sendStatus(200);
 }));
 
 app.post(['/devices/:id/unwatch', '/v1/devices/:id/unwatch'], safe(async (req, res) => {
-    const id = req.params.id.toLowerCase();
-    const watcherId = req.query.watcherId;
-    log("info", `🙈 Remote Watch stopped for ${id} by ${watcherId}`);
-    await broadcast(id, { type: 'watch_stop', watcherId: watcherId });
-    res.sendStatus(200);
-}));
+    const d = devices?.[req.params.id.toLowerCase()];
+    if (!d) return res.sendStatus(404);
+    d.isWatched = false; delete d.watcherName;
 
-app.post(['/devices/wakeup-all', '/v1/devices/wakeup-all'], safe(async (req, res) => {
-    log("info", "📣 Global Wakeup requested");
-    await broadcast(null, { type: 'wakeup' });
-    res.sendStatus(200);
-}));
-
-app.post(['/test/proximity', '/v1/test/proximity'], safe(async (req, res) => {
-    log("info", "🧪 Test Proximity requested");
-    await broadcast(null, {
-        type: 'proximity_alert',
-        name: 'TEST-BOT',
-        distance: '15',
-        deviceId: 'test_bot_999',
-        lat: '47.0971',
-        lon: '15.4175'
-    });
-    res.sendStatus(200);
-}));
-
-app.post(['/location/clear/:id', '/v1/location/clear/:id'], safe(async (req, res) => {
-    const id = req.params.id.toLowerCase();
-    log("info", `Sweep: History cleared for ${id}`);
+    if (d.fcmToken) {
+        admin.messaging().send({
+            data: { type: 'watch_state', state: 'false' },
+            token: d.fcmToken
+        }).catch(e => console.warn(`⚠️ Unwatch Notification failed:`, e.message));
+    }
     res.sendStatus(200);
 }));
 
 app.post(['/devices/:id/break-lock', '/v1/devices/:id/break-lock'], safe(async (req, res) => {
     const id = req.params.id.toLowerCase();
-    log("info", `🔓 Break Lock requested for ${id}`);
-    await broadcast(id, { type: 'break_lock', deviceId: id });
+    const d = devices?.[id];
+    if (!d) return res.sendStatus(404);
+
+    if (d.fcmToken) {
+        admin.messaging().send({
+            data: { type: 'break_lock', deviceId: id },
+            token: d.fcmToken,
+            android: { priority: 'high' }
+        }).then(() => console.log(`🔓 Break Lock sent to ${id}`))
+          .catch(e => console.warn(`⚠️ Break Lock FCM failed for ${id}:`, e.message));
+    }
     res.sendStatus(200);
 }));
 
-// --- GEOFENCE API ---
-app.get(['/geofences', '/v1/geofences'], safe((req, res) => {
-    res.json(geofences);
+app.get(['/geofences', '/v1/geofences'], safe((req, res) => res.json(geofences || [])));
+app.post(['/geofences', '/v1/geofences'], safe(async (req, res) => {
+    if (!req.body?.id) return res.sendStatus(400);
+    geofences = (geofences || []).filter(item => item.id !== req.body.id);
+    geofences.push(req.body);
+    await queueWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    broadcastGeofenceReload(); res.sendStatus(200);
 }));
 
-app.post(['/geofences', '/v1/geofences'], safe((req, res) => {
-    const gf = req.body;
-    if (!gf.id) return res.status(400).send('Missing ID');
+app.delete(['/geofences/:id', '/v1/geofences/:id'], safe(async (req, res) => {
+    geofences = (geofences || []).filter(item => item.id !== req.params.id);
+    await queueWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+    broadcastGeofenceReload(); res.sendStatus(200);
+}));
 
-    const index = geofences.findIndex(g => g.id === gf.id);
-    if (index >= 0) {
-        geofences[index] = gf;
-        log("info", `📍 Updated geofence: ${gf.name || gf.id}`);
-    } else {
-        geofences.push(gf);
-        log("info", `📍 Created geofence: ${gf.name || gf.id}`);
+// --- PERSISTENCE ---
+let writeQueue = Promise.resolve();
+function queueWrite(file, data) {
+    writeQueue = writeQueue.then(async () => {
+        try {
+            const tmp = file + '.tmp';
+            await fs.writeFile(tmp, data); await fs.rename(tmp, file);
+        } catch (e) {
+            console.error(`💾 WRITE ERROR [${file}]:`, e.message);
+        }
+    });
+    return writeQueue;
+}
+
+let saveTimer = null; let savePending = false;
+function saveDevicesSafe(opts = { immediate: false }) {
+    savePending = true;
+
+    // 1. SOFORT-MODUS: Bei Alarmen oder kritischen Statusänderungen
+    if (opts.immediate || opts.forceSave) {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = null;
+        savePending = false;
+        return queueWrite(DATA_FILE, JSON.stringify(devices, null, 2))
+            .then(() => console.log("🔥 Critical Flush: Data persisted immediately."));
     }
 
-    fs.writeFileSync(gfPath, JSON.stringify(geofences, null, 2));
-    res.sendStatus(200);
-}));
+    // 2. DEBOUNCED-MODUS: Normales Sammeln von Updates
+    if (saveTimer) return; // Timer läuft bereits, wird nach Ablauf prüfen
 
-app.delete('/v1/geofences/:id', safe((req, res) => {
-    const id = req.params.id;
-    const initialCount = geofences.length;
-    geofences = geofences.filter(g => g.id !== id);
+    saveTimer = setTimeout(async () => {
+        saveTimer = null;
+        if (!savePending) return;
+        savePending = false;
+        await queueWrite(DATA_FILE, JSON.stringify(devices, null, 2));
+        console.log("💾 Periodic Save: Device state persisted.");
+    }, 10000); // 10s Puffer für normale Updates
+}
 
-    if (geofences.length < initialCount) {
-        log("info", `📍 Deleted geofence: ${id}`);
-        fs.writeFileSync(gfPath, JSON.stringify(geofences, null, 2));
-        res.sendStatus(200);
-    } else {
-        res.status(404).send('Not found');
+async function init() {
+    try {
+        const raw = await fs.readFile(DATA_FILE, 'utf8');
+        devices = JSON.parse(raw);
+    } catch (e) {
+        console.warn("⚠️ devices.json load failed, using empty state:", e.message);
+        devices = {};
     }
-}));
+    try {
+        const rawGf = await fs.readFile(GEOFENCE_FILE, 'utf8');
+        geofences = JSON.parse(rawGf);
+    } catch (e) {
+        console.warn("⚠️ geofences.json load failed, using empty state:", e.message);
+        geofences = [];
+    }
+}
 
-// --- DEVICE STATE ENGINE ---
 function updateDevice(id, data) {
-    id = id.toLowerCase();
     const old = devices[id] || {};
+    if (data.timestamp < old.timestamp) return;
 
-    const fcmToken = data.fcmToken || old.fcmToken;
+    // 🔥 TOKEN PROTECTION: Don't overwrite with empty values
+    const fcmToken = (data.fcmToken || data.fcm_token) || old.fcmToken;
     const name = data.name || old.name;
-    const alarmActive = data.alarmActive !== undefined ? data.alarmActive : old.alarmActive;
 
+    const alarmActive = (old.alarmActive && !data.alarmActive && Date.now() - (old.lastSeen || 0) < 30000) ? true : data.alarmActive;
+
+    // 🔥 BATTERY PROTECTION: Don't overwrite with 0 or null if we have an old value
     const battery = (data.battery > 0) ? data.battery : (old.battery || 0);
-    if (data.battery !== undefined && data.battery !== old.battery) log("debug", `🔋 ${id}: ${old.battery ?? 'new'} -> ${data.battery}%`);
+
+    if (data.battery !== undefined && data.battery !== old.battery) console.log(`🔋 ${id}: ${old.battery ?? 'new'} -> ${data.battery}%`);
 
     const isRealGeofence = typeof data.geofenceEvent === 'string' && (data.geofenceEvent.startsWith('enter:') || data.geofenceEvent.startsWith('exit:'));
 
@@ -347,6 +491,12 @@ async function handleEvents(id, data, old) {
     if (typeof data.geofenceEvent === 'string' && (data.geofenceEvent.startsWith('enter:') || data.geofenceEvent.startsWith('exit:'))) {
         const key = `gf:${id}:${data.geofenceEvent}`;
 
+        // --- 🛡️ MEMORY PROTECTION: Clear old lastPushTimes if too large ---
+        if (Object.keys(lastPushTimes).length > 5000) {
+            console.log("🧹 Clearing lastPushTimes (Memory Protection)");
+            lastPushTimes = {};
+        }
+
         if (Date.now() - (lastPushTimes[key] || 0) > 120000) {
             lastPushTimes[key] = Date.now();
             const [action, ...name] = data.geofenceEvent.split(':');
@@ -358,30 +508,39 @@ async function handleEvents(id, data, old) {
 
 async function broadcast(senderId, payload) {
     const tokens = Object.values(devices)
-        .filter(d => (senderId === null || d.deviceId !== senderId) && d.fcmToken && d.fcmToken.length > 5)
+        .filter(d => d.deviceId !== senderId && d.fcmToken && d.fcmToken.length > 5)
         .map(d => d.fcmToken);
 
     if (tokens.length === 0) {
-        log("debug", `ℹ️ BCast: No target tokens for event ${payload.type}`);
+        console.log(`ℹ️ BCast: No target tokens for event ${payload.type} (Active devices: ${Object.keys(devices).length})`);
         return;
     }
 
-    log("info", `📣 Broadcasting ${payload.type} to ${tokens.length} devices...`);
+    console.log(`📣 Broadcasting ${payload.type} to ${tokens.length} devices...`);
 
     for (let i = 0; i < tokens.length; i += 500) {
         try {
-            const batch = tokens.slice(i, i + 500);
-            await admin.messaging().sendEachForMulticast({
-                tokens: batch,
-                data: payload,
-                android: { priority: 'high' }
-            });
-        } catch (e) {
-            log("error", `❌ FCM Broadcast failed: ${e.message}`);
-        }
+            const res = await admin.messaging().sendEachForMulticast({ data: payload, tokens: tokens.slice(i, i + 500), android: { priority: 'high' } });
+            if (res.failureCount > 0) {
+                const failed = []; res.responses.forEach((r, idx) => {
+                    if (!r.success && r.error) {
+                        const code = r.error.code || "";
+                        if (code.includes('not-registered') || code.includes('invalid')) failed.push(tokens[idx]);
+                    }
+                });
+                Object.values(devices).forEach(d => { if (failed.includes(d.fcmToken)) delete d.fcmToken; });
+            }
+        } catch (e) { console.error("🚨 BCast Multicast Error:", e.message); }
     }
 }
 
-// --- SERVER START ---
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => log("info", `🚀 Server running on port ${PORT} (V1.2.3)`));
+async function startServer() {
+    try {
+        await initFirebase(); await init();
+        server.listen(PORT, () => console.log(`🚀 GPS Server Port ${PORT}`));
+        grpcServer.bindAsync(`0.0.0.0:${GRPC_PORT}`, grpc.ServerCredentials.createInsecure(), (err, p) => {
+            if (!err) console.log(`📡 gRPC Port ${p}`);
+        });
+    } catch (e) { console.error("💥 FATAL:", e); process.exit(1); }
+}
+startServer();
