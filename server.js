@@ -74,7 +74,8 @@ const locationSchema = z.object({
     isWifi: z.boolean().optional(),
     motionState: z.string().optional(),
     geofenceEvent: z.string().optional(),
-    name: z.string().optional()
+    name: z.string().optional(),
+    sats: z.number().optional()
 });
 
 const batchSchema = z.array(locationSchema);
@@ -116,6 +117,7 @@ function mapAppToProto(data) {
     if (data.visualLat) p.visual_lat = data.visualLat;
     if (data.visualLon) p.visual_lon = data.visualLon;
     if (data.watcherName) p.watcher_name = data.watcherName;
+    if (data.sats !== undefined) p.sats = data.sats;
     return p;
 }
 
@@ -139,6 +141,7 @@ function mapProtoToApp(data) {
     mapped.snappedLon = data.snappedLon || data.snapped_lon;
     mapped.visualLat = data.visualLat || data.visual_lat;
     mapped.visualLon = data.visualLon || data.visual_lon;
+    mapped.sats = data.sats ?? data.sats_count;
     return mapped;
 }
 
@@ -282,6 +285,17 @@ app.post(['/location', '/v1/location'], safe(async (req, res) => {
     res.sendStatus(200);
 }));
 
+app.post('/v1/location/raw', safe(async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.sendStatus(400);
+    const data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number }));
+    const id = data.deviceId?.toLowerCase();
+    if (!id) return res.sendStatus(400);
+    updateDevice(id, data);
+    saveDevicesSafe();
+    if (devices[id]) pushUpdateToAll(devices[id]);
+    res.sendStatus(200);
+}));
+
 app.post(['/location/update-batch', '/v1/location/batch'], safe(async (req, res) => {
     let batch = Buffer.isBuffer(req.body) ? (LocationBatchProto.decode(req.body).updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, { defaults: false, longs: Number }))) : req.body;
     const val = batchSchema.safeParse(batch);
@@ -338,6 +352,33 @@ app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], safe(async (req, res) 
     }
 
     io.to(id).emit('command', { deviceId: id, action: d.alarmActive ? 'START_ALARM' : 'STOP_ALARM' });
+    res.sendStatus(200);
+}));
+
+app.post(['/devices/:id/wakeup', '/v1/devices/:id/wakeup'], safe(async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const d = devices?.[id];
+    if (!d) return res.sendStatus(404);
+
+    if (d.fcmToken) {
+        admin.messaging().send({
+            data: { type: 'wakeup', deviceId: id },
+            token: d.fcmToken,
+            android: { priority: 'high' }
+        }).catch(e => console.warn(`⚠️ Wakeup FCM failed for ${id}:`, e.message));
+    }
+    res.sendStatus(200);
+}));
+
+app.post('/v1/devices/wakeup-all', safe(async (req, res) => {
+    Object.values(devices).forEach(d => {
+        if (d.fcmToken) {
+            admin.messaging().send({
+                data: { type: 'wakeup', deviceId: d.deviceId },
+                token: d.fcmToken
+            }).catch(() => {});
+        }
+    });
     res.sendStatus(200);
 }));
 
@@ -399,6 +440,22 @@ app.delete(['/geofences/:id', '/v1/geofences/:id'], safe(async (req, res) => {
     geofences = (geofences || []).filter(item => item.id !== req.params.id);
     await queueWrite(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
     broadcastGeofenceReload(); res.sendStatus(200);
+}));
+
+app.post('/v1/test/proximity', safe(async (req, res) => {
+    // Dummy response for testing proximity logic
+    res.sendStatus(200);
+}));
+
+// =====================================================
+// HISTORY / MAINTENANCE
+// =====================================================
+
+app.post(['/location/clear/:id', '/v1/location/clear/:id'], safe(async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    // In this file-based implementation, we don't have a history list separate from 'devices'
+    // but we could clear specific metadata if needed.
+    res.sendStatus(200);
 }));
 
 // --- PERSISTENCE ---
