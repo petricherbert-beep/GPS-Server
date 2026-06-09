@@ -30,6 +30,7 @@ message LocationUpdateProto {
   optional double visual_lat = 25;
   optional double visual_lon = 26;
   string motion_state = 27;
+  optional int32 sats = 28;
 }
 
 message LocationBatchProto {
@@ -64,6 +65,7 @@ message DeviceLocationProto {
   optional double visual_lon = 27;
   string geofence_event = 24;
   string motion_state = 25;
+  optional int32 sats = 28;
 }
 
 message DeviceListProto {
