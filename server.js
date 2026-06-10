@@ -443,7 +443,14 @@ app.delete(['/geofences/:id', '/v1/geofences/:id'], safe(async (req, res) => {
 }));
 
 app.post('/v1/test/proximity', safe(async (req, res) => {
-    // Dummy response for testing proximity logic
+    // 🔥 V75: Realistic Proximity Test
+    const testId = "test_device";
+    await broadcast(testId, {
+        type: 'proximity_alert',
+        deviceId: testId,
+        name: "Test-Dummy",
+        distance: "150"
+    });
     res.sendStatus(200);
 }));
 
@@ -545,6 +552,18 @@ function updateDevice(id, data) {
 
 async function handleEvents(id, data, old) {
     const device = devices[id]; if (!device) return;
+
+    // 🔥 V75: Accident Alert Broadcast
+    if (data.accident && !old.accident) {
+        console.log(`🚨 BROADCASTING ACCIDENT: ${id}`);
+        await broadcast(id, {
+            type: 'accident_alert',
+            deviceId: id,
+            name: device.name || id,
+            message: `${device.name || id} hat einen Unfall!`
+        });
+    }
+
     if (typeof data.geofenceEvent === 'string' && (data.geofenceEvent.startsWith('enter:') || data.geofenceEvent.startsWith('exit:'))) {
         const key = `gf:${id}:${data.geofenceEvent}`;
 
