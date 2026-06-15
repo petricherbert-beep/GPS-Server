@@ -427,6 +427,27 @@ app.post(['/devices/:id/break-lock', '/v1/devices/:id/break-lock'], safe(async (
     res.sendStatus(200);
 }));
 
+app.post('/v1/devices/:id/proximity', safe(async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const otherId = req.query.otherId?.toLowerCase();
+    const distance = req.query.distance;
+    const name = req.query.name || "Unbekanntes Gerät";
+
+    if (!id || !otherId) return res.sendStatus(400);
+
+    console.log(`📏 PROXIMITY REPORT: ${id} near ${otherId} (${distance}m)`);
+
+    await broadcast(id, {
+        type: 'proximity_alert',
+        deviceId: id,
+        otherId: otherId,
+        name: name,
+        distance: distance.toString()
+    });
+
+    res.sendStatus(200);
+}));
+
 app.get(['/geofences', '/v1/geofences'], safe((req, res) => res.json(geofences || [])));
 app.post(['/geofences', '/v1/geofences'], safe(async (req, res) => {
     if (!req.body?.id) return res.sendStatus(400);
