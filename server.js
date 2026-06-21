@@ -349,6 +349,13 @@ app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], safe(async (req, res) 
             token: d.fcmToken,
             android: { priority: 'high' }
         }).catch(e => console.warn(`⚠️ Direct Alarm FCM failed for ${id}:`, e.message));
+    } else if (!d.alarmActive && d.fcmToken) {
+        // 🔥 V126: Also send STOP command via FCM for backgrounded devices
+        admin.messaging().send({
+            data: { type: 'stop_alarm', deviceId: id },
+            token: d.fcmToken,
+            android: { priority: 'high' }
+        }).catch(e => console.warn(`⚠️ Stop Alarm FCM failed for ${id}:`, e.message));
     }
 
     io.to(id).emit('command', { deviceId: id, action: d.alarmActive ? 'START_ALARM' : 'STOP_ALARM' });
