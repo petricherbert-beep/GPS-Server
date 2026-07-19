@@ -217,11 +217,15 @@ grpcServer.addService(trackingProto.TrackingService.service, {
         call.lastActivity = Date.now();
         grpcStreams.add(call);
         const cleanup = () => grpcStreams.delete(call);
+
         call.on('data', (event) => {
             if (!call || call.destroyed) return;
+            // 🔥 V198: Any incoming data (even pings) resets the activity timer
             call.lastActivity = Date.now();
+
             const update = event.location_update;
-            if (!update) return;
+            if (!update) return; // Keep-alive ping
+
             const data = mapProtoToApp(update);
             const id = data.deviceId?.toLowerCase();
             if (id) {
