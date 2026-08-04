@@ -234,7 +234,8 @@ grpcServer.addService(trackingProto.TrackingService.service, {
     GetDevices: (call, callback) => {
         const meta = call.metadata.get('x-api-key');
         if (meta?.[0] !== API_KEY) return callback({ code: grpc.status.UNAUTHENTICATED, details: "Invalid API Key" });
-        callback(null, { devices: Object.values(devices || {}) });
+        const list = Object.values(devices || {});
+        callback(null, { devices: list.map(d => mapAppToProto(d)) });
     },
     TrackLocation: (call) => {
         const meta = call.metadata.get('x-api-key');
@@ -250,12 +251,12 @@ grpcServer.addService(trackingProto.TrackingService.service, {
             const update = event.location_update;
             if (!update) return;
             const data = mapProtoToApp(update);
-            const id = data.deviceId?.toLowerCase();
+            const id = data.device_id?.toLowerCase();
             if (id) {
-                for (const old of grpcStreams) { if (old !== call && old.deviceId === id) { try { old.end(); } catch {} grpcStreams.delete(old); } }
-                call.deviceId = id;
+                for (const old of grpcStreams) { if (old !== call && old.device_id === id) { try { old.end(); } catch {} grpcStreams.delete(old); } }
+                call.device_id = id;
                 updateDevice(id, data);
-                saveDevicesSafe({ immediate: data.alarmActive || data.accident });
+                saveDevicesSafe({ immediate: data.alarm_active || data.accident });
                 const updated = devices[id];
                 if (updated) pushUpdateToAll(updated);
             }
@@ -292,7 +293,7 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
     socket.on('join_device', (data) => {
-        const id = (typeof data === 'string' ? data : data?.deviceId)?.toLowerCase().trim();
+        const id = (typeof data === 'string' ? data : (data?.device_id || data?.deviceId))?.toLowerCase().trim();
         if (id) { socket.join(id); if (devices[id]) socket.emit('location_update', devices[id]); }
     });
 });
@@ -317,7 +318,7 @@ app.post(['/location', '/v1/location'], safe(async (req, res) => {
     const val = locationSchema.safeParse(data);
     if (!val.success) return res.status(400).json(val.error.format());
     data = val.data;
-    const id = data.deviceId.toLowerCase();
+    const id = (data.device_id || data.deviceId).toLowerCase();
     updateDevice(id, data);
     saveDevicesSafe();
     if (devices[id]) pushUpdateToAll(devices[id]);
@@ -327,7 +328,7 @@ app.post(['/location', '/v1/location'], safe(async (req, res) => {
 app.post('/v1/location/raw', safe(async (req, res) => {
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.sendStatus(400);
     const data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number }));
-    const id = data.deviceId?.toLowerCase();
+    const id = data.device_id?.toLowerCase();
     if (!id) return res.sendStatus(400);
     updateDevice(id, data);
     saveDevicesSafe();
@@ -340,9 +341,15 @@ app.post(['/location/update-batch', '/v1/location/batch'], safe(async (req, res)
     const val = batchSchema.safeParse(batch);
     if (!val.success) return res.status(400).json(val.error.format());
     batch = val.data;
-    batch.forEach(item => { const id = item.deviceId?.toLowerCase(); if (id) updateDevice(id, item); });
+    batch.forEach(item => {
+        const id = (item.device_id || item.deviceId)?.toLowerCase();
+        if (id) updateDevice(id, item);
+    });
     saveDevicesSafe();
-    if (batch.length > 0 && batch[0].deviceId) { const up = devices[batch[0].deviceId.toLowerCase()]; if (up) pushUpdateToAll(up); }
+    if (batch.length > 0) {
+        const firstId = (batch[0].device_id || batch[0].deviceId)?.toLowerCase();
+        if (firstId && devices[firstId]) pushUpdateToAll(devices[firstId]);
+    }
     res.sendStatus(200);
 }));
 
@@ -659,8 +666,8 @@ async function handleEvents(id, data, old) {
 
 async function broadcast(senderId, payload) {
     const tokens = Object.values(devices)
-        .filter(d => d.deviceId !== senderId && d.fcmToken && d.fcmToken.length > 5)
-        .map(d => d.fcmToken);
+        .filter(d => (d.device_id || d.deviceId) !== senderId && (d.fcm_token || d.fcmToken) && (d.fcm_token || d.fcmToken).length > 5)
+        .map(d => d.fcm_token || d.fcmToken);
 
     if (tokens.length === 0) {
         console.log(`ℹ️ BCast: No target tokens for event ${payload.type} (Active devices: ${Object.keys(devices).length})`);
@@ -679,7 +686,13 @@ async function broadcast(senderId, payload) {
                         if (code.includes('not-registered') || code.includes('invalid')) failed.push(tokens[idx]);
                     }
                 });
-                Object.values(devices).forEach(d => { if (failed.includes(d.fcmToken)) delete d.fcmToken; });
+                Object.values(devices).forEach(d => {
+                    const token = d.fcm_token || d.fcmToken;
+                    if (failed.includes(token)) {
+                        delete d.fcm_token;
+                        delete d.fcmToken;
+                    }
+                });
             }
         } catch (e) { console.error("🚨 BCast Multicast Error:", e.message); }
     }
