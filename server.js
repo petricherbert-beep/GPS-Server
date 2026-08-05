@@ -111,14 +111,13 @@ const grpcStreams = new Map(); // 🔥 V301: Changed to Map for efficient lookup
 function mapAppToProto(data) {
     if (!data) return data;
 
-    // 🔥 V305: Ensure strict mapping to DeviceLocationProto field names
-    // protobufjs uses the exact names from the .proto file if configured,
-    // but sometimes it defaults to camelCase. We provide BOTH.
+    // 🔥 V306: Protobufjs in JS often prefers camelCase for property names
+    // unless configured otherwise. We provide the names matching DeviceLocationProto.
     const id = data.device_id || data.deviceId || "";
 
-    return {
+    const p = DeviceLocationProto.create({
+        deviceId: id, // Protobufjs typically maps device_id to deviceId
         device_id: id,
-        deviceId: id, // Fallback
         lat: Number(data.lat) || 0,
         lon: Number(data.lon) || 0,
         battery: data.battery ?? 0,
@@ -129,34 +128,41 @@ function mapAppToProto(data) {
         offline: !!data.offline,
         name: data.name || "",
         status: data.status || "online",
-        alarm_active: !!(data.alarm_active || data.alarmActive),
         alarmActive: !!(data.alarm_active || data.alarmActive),
-        is_awake: !!(data.is_awake ?? data.isAwake ?? true),
+        alarm_active: !!(data.alarm_active || data.alarmActive),
         isAwake: !!(data.is_awake ?? data.isAwake ?? true),
-        is_watched: !!(data.is_watched || data.isWatched),
+        is_awake: !!(data.is_awake ?? data.isAwake ?? true),
         isWatched: !!(data.is_watched || data.isWatched),
-        watcher_name: data.watcher_name || data.watcherName || "",
+        is_watched: !!(data.is_watched || data.isWatched),
         watcherName: data.watcher_name || data.watcherName || "",
-        fcm_token: data.fcm_token || data.fcmToken || "",
+        watcher_name: data.watcher_name || data.watcherName || "",
         fcmToken: data.fcm_token || data.fcmToken || "",
-        is_locked: !!(data.is_locked || data.isLocked),
+        fcm_token: data.fcm_token || data.fcmToken || "",
         isLocked: !!(data.is_locked || data.isLocked),
-        is_motion: !!(data.is_motion || data.isMotion),
+        is_locked: !!(data.is_locked || data.isLocked),
         isMotion: !!(data.is_motion || data.isMotion),
-        is_wifi: !!(data.is_wifi || data.isWifi),
+        is_motion: !!(data.is_motion || data.isMotion),
         isWifi: !!(data.is_wifi || data.isWifi),
+        is_wifi: !!(data.is_wifi || data.isWifi),
         accident: !!data.accident,
+        snappedLat: data.snapped_lat || data.snappedLat || 0,
         snapped_lat: data.snapped_lat || data.snappedLat || 0,
+        snappedLon: data.snapped_lon || data.snappedLon || 0,
         snapped_lon: data.snapped_lon || data.snappedLon || 0,
+        visualLat: data.visual_lat || data.visualLat || 0,
         visual_lat: data.visual_lat || data.visualLat || 0,
+        visualLon: data.visual_lon || data.visualLon || 0,
         visual_lon: data.visual_lon || data.visualLon || 0,
-        geofence_event: data.geofence_event || data.geofenceEvent || "",
         geofenceEvent: data.geofence_event || data.geofenceEvent || "",
-        motion_state: data.motion_state || data.motionState || "STILL",
+        geofence_event: data.geofence_event || data.geofenceEvent || "",
         motionState: data.motion_state || data.motionState || "STILL",
+        motion_state: data.motion_state || data.motionState || "STILL",
         sats: data.sats ?? 0,
+        intermediateCoords: data.intermediate_coords || data.intermediateCoords || [],
         intermediate_coords: data.intermediate_coords || data.intermediateCoords || []
-    };
+    });
+
+    return p;
 }
 
 function mapProtoToApp(data) {
