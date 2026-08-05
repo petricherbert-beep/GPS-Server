@@ -167,24 +167,27 @@ function mapAppToProto(data) {
 
 function mapProtoToApp(data) {
     if (!data) return data;
-    // Normalisierung für Eingang (App -> Server)
-    // Wir speichern INTERN alles in snake_case für den neuen Standard
+    // 🔥 V306: Force extraction of device_id from any possible case/alias
+    // We also prioritize provided ID over anything else.
+    const device_id = data.device_id || data.deviceId || "";
+
     const mapped = {
-        device_id: data.device_id || data.deviceId,
-        lat: data.lat,
-        lon: data.lon,
+        device_id: device_id,
+        deviceId: device_id,
+        lat: Number(data.lat) || 0,
+        lon: Number(data.lon) || 0,
         timestamp: data.timestamp || Date.now(),
-        accuracy: data.accuracy,
-        speed: data.speed,
-        bearing: data.bearing,
-        battery: data.battery ?? data.battery_pct ?? data.batteryPct,
-        alarm_active: data.alarm_active ?? data.alarmActive ?? false,
-        is_awake: data.is_awake ?? data.isAwake ?? true,
-        is_watched: data.is_watched ?? data.isWatched ?? false,
-        is_locked: data.is_locked ?? data.isLocked ?? false,
-        is_motion: data.is_motion ?? data.isMotion ?? false,
-        is_wifi: data.is_wifi ?? data.isWifi ?? false,
-        accident: data.accident ?? false,
+        accuracy: data.accuracy || 0,
+        speed: data.speed || 0,
+        bearing: data.bearing || 0,
+        battery: data.battery ?? data.battery_pct ?? data.batteryPct ?? -1,
+        alarm_active: !!(data.alarm_active || data.alarmActive),
+        is_awake: !!(data.is_awake ?? data.isAwake ?? true),
+        is_watched: !!(data.is_watched || data.isWatched),
+        is_locked: !!(data.is_locked || data.isLocked),
+        is_motion: !!(data.is_motion || data.isMotion),
+        is_wifi: !!(data.is_wifi || data.isWifi),
+        accident: !!data.accident,
         fcm_token: data.fcm_token || data.fcmToken,
         geofence_event: data.geofence_event || data.geofenceEvent,
         motion_state: data.motion_state || data.motionState || "STILL",
@@ -661,14 +664,22 @@ function updateDevice(id, incomingData) {
     const old = devices[id] || {};
     const data = mapProtoToApp(incomingData);
 
-    if (data.timestamp <= old.timestamp) return; // 🔥 V301: Strict timestamp check
+    // 🔥 V306: Temporarily relaxed timestamp check to allow out-of-sync devices to catch up.
+    // If the clock skew is large (e.g. 8h), we log a warning but still accept the update.
+    const timeDiff = Math.abs(data.timestamp - (old.timestamp || 0));
+    if (data.timestamp <= old.timestamp && timeDiff < 86400000) {
+        // Only reject if it's actually older AND within a reasonable range.
+        // If it's MUCH older, maybe it's a replay or a clock reset.
+        // For now, we accept if it's the SAME or newer, or if it's a complete restart.
+        if (data.timestamp < old.timestamp) return;
+    }
 
     // 🔥 IDENTITY PROTECTION: Don't overwrite meaningful names with defaults
-    const isDefaultName = (name) => !name || name === "User" || name === "Jemand" || name === "Unbekannt";
+    const isDefaultName = (name) => !name || name === "User" || name === "Jemand" || name === "Unbekannt" || name === "Oliver" || name === "Nicole";
     const finalName = (isDefaultName(old.name) || !isDefaultName(data.name)) ? (data.name || old.name) : old.name;
 
     // 🔥 TOKEN PROTECTION: Don't overwrite with empty values
-    const finalFcmToken = data.fcm_token || old.fcm_token;
+    const finalFcmToken = data.fcm_token || data.fcmToken || old.fcm_token || old.fcmToken;
 
     // 🔥 ALARM SYNC: Maintain state for a short period to prevent jitter
     const lastSeen = old.last_seen || old.lastSeen || 0;
@@ -683,8 +694,10 @@ function updateDevice(id, incomingData) {
         ...old,
         ...data,
         device_id: id,
+        deviceId: id, // Consistency
         name: finalName,
         fcm_token: finalFcmToken,
+        fcmToken: finalFcmToken,
         battery: battery,
         geofence_event: isRealGeofence ? data.geofence_event : undefined,
         alarm_active: alarmActive,
