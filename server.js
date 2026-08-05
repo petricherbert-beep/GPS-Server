@@ -110,83 +110,53 @@ const grpcStreams = new Map(); // 🔥 V301: Changed to Map for efficient lookup
 // --- gRPC HELPERS ---
 function mapAppToProto(data) {
     if (!data) return data;
-    const p = { ...data };
 
-    // 🔥 V300: Provide BOTH snake_case and camelCase to ensure Protobuf encoders/decoders find the fields.
-    // The previous 'delete' calls were causing empty fields in the app.
-    const id = data.device_id || data.deviceId;
-    p.device_id = id;
-    p.deviceId = id;
+    // 🔥 V305: Ensure strict mapping to DeviceLocationProto field names
+    // protobufjs uses the exact names from the .proto file if configured,
+    // but sometimes it defaults to camelCase. We provide BOTH.
+    const id = data.device_id || data.deviceId || "";
 
-    const pid = data.point_id || data.pointId;
-    p.point_id = pid;
-    p.pointId = pid;
-
-    const alarm = data.alarm_active ?? data.alarmActive ?? false;
-    p.alarm_active = alarm;
-    p.alarmActive = alarm;
-
-    const awake = data.is_awake ?? data.isAwake ?? true;
-    p.is_awake = awake;
-    p.isAwake = awake;
-
-    const watched = data.is_watched ?? data.isWatched ?? false;
-    p.is_watched = watched;
-    p.isWatched = watched;
-
-    const locked = data.is_locked ?? data.isLocked ?? false;
-    p.is_locked = locked;
-    p.isLocked = locked;
-
-    const motion = data.is_motion ?? data.isMotion ?? false;
-    p.is_motion = motion;
-    p.isMotion = motion;
-
-    const wifi = data.is_wifi ?? data.isWifi ?? false;
-    p.is_wifi = wifi;
-    p.isWifi = wifi;
-
-    const token = data.fcm_token || data.fcmToken;
-    p.fcm_token = token;
-    p.fcmToken = token;
-
-    const event = data.geofence_event || data.geofenceEvent;
-    p.geofence_event = event;
-    p.geofenceEvent = event;
-
-    const mstate = data.motion_state || data.motionState;
-    p.motion_state = mstate;
-    p.motionState = mstate;
-
-    p.battery = data.battery ?? 0;
-    p.speed = data.speed ?? 0;
-    p.bearing = data.bearing ?? 0;
-    p.accuracy = data.accuracy ?? 0;
-
-    const slat = data.snapped_lat || data.snappedLat;
-    p.snapped_lat = slat;
-    p.snappedLat = slat;
-
-    const slon = data.snapped_lon || data.snappedLon;
-    p.snapped_lon = slon;
-    p.snappedLon = slon;
-
-    const vlat = data.visual_lat || data.visualLat;
-    p.visual_lat = vlat;
-    p.visualLat = vlat;
-
-    const vlon = data.visual_lon || data.visualLon;
-    p.visual_lon = vlon;
-    p.visualLon = vlon;
-
-    const wname = data.watcher_name || data.watcherName;
-    p.watcher_name = wname;
-    p.watcherName = wname;
-
-    p.sats = data.sats ?? 0;
-    p.intermediate_coords = data.intermediate_coords || data.intermediateCoords || [];
-
-    return p;
+    return {
+        device_id: id,
+        deviceId: id, // Fallback
+        lat: Number(data.lat) || 0,
+        lon: Number(data.lon) || 0,
+        battery: data.battery ?? 0,
+        speed: data.speed ?? 0,
+        bearing: data.bearing ?? 0,
+        timestamp: Number(data.timestamp) || Date.now(),
+        accuracy: data.accuracy ?? 0,
+        offline: !!data.offline,
+        name: data.name || "",
+        status: data.status || "online",
+        alarm_active: !!(data.alarm_active || data.alarmActive),
+        alarmActive: !!(data.alarm_active || data.alarmActive),
+        is_awake: !!(data.is_awake ?? data.isAwake ?? true),
+        isAwake: !!(data.is_awake ?? data.isAwake ?? true),
+        is_watched: !!(data.is_watched || data.isWatched),
+        isWatched: !!(data.is_watched || data.isWatched),
+        watcher_name: data.watcher_name || data.watcherName || "",
+        watcherName: data.watcher_name || data.watcherName || "",
+        fcm_token: data.fcm_token || data.fcmToken || "",
+        fcmToken: data.fcm_token || data.fcmToken || "",
+        is_locked: !!(data.is_locked || data.isLocked),
+        isLocked: !!(data.is_locked || data.isLocked),
+        is_motion: !!(data.is_motion || data.isMotion),
+        isMotion: !!(data.is_motion || data.isMotion),
+        is_wifi: !!(data.is_wifi || data.isWifi),
+        isWifi: !!(data.is_wifi || data.isWifi),
+        accident: !!data.accident,
+        snapped_lat: data.snapped_lat || data.snappedLat || 0,
+        snapped_lon: data.snapped_lon || data.snappedLon || 0,
+        visual_lat: data.visual_lat || data.visualLat || 0,
+        visual_lon: data.visual_lon || data.visualLon || 0,
+        geofence_event: data.geofence_event || data.geofenceEvent || "",
+        geofenceEvent: data.geofence_event || data.geofenceEvent || "",
+        motion_state: data.motion_state || data.motionState || "STILL",
+        motionState: data.motion_state || data.motionState || "STILL",
+        sats: data.sats ?? 0,
+        intermediate_coords: data.intermediate_coords || data.intermediateCoords || []
+    };
 }
 
 function mapProtoToApp(data) {
@@ -379,6 +349,16 @@ app.use((req, res, next) => {
 // app.use(bodyParser.raw({ type: 'application/x-protobuf', limit: '200kb' }));
 
 app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
+
+// 🔥 V305: Debug route to verify server state
+app.get('/v1/debug/devices', safe((req, res) => {
+    res.json({
+        count: Object.keys(devices).length,
+        devices: devices,
+        lastPushTimesSize: Object.keys(lastPushTimes).length,
+        grpcStreamsCount: grpcStreams.size
+    });
+}));
 
 const jsonParser = bodyParser.json({ limit: '200kb' });
 const protoParser = bodyParser.raw({ type: 'application/x-protobuf', limit: '200kb' });
