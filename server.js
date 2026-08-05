@@ -11,6 +11,7 @@ import protoLoader from '@grpc/proto-loader';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import rateLimit from 'express-rate-limit';
+import crypto from 'crypto'; // 🔥 V302: For UUID and TimingSafeEqual
 
 import compression from 'compression';
 import { z } from 'zod';
@@ -18,6 +19,7 @@ import { z } from 'zod';
 // --- 🧱 TOP-LEVEL CRASH PROTECTION ---
 process.on("uncaughtException", (err) => {
     console.error("💥 UNCAUGHT EXCEPTION:", err);
+    process.exit(1);
 });
 
 process.on("unhandledRejection", (err) => {
@@ -103,34 +105,84 @@ const safe = fn => (req, res, next) =>
 let devices = {};
 let geofences = [];
 let lastPushTimes = {};
-const grpcStreams = new Set();
+const grpcStreams = new Map(); // 🔥 V301: Changed to Map for efficient lookup
 
 // --- gRPC HELPERS ---
 function mapAppToProto(data) {
     if (!data) return data;
     const p = { ...data };
 
-    // Normalisierung für Ausgang (Server -> App)
-    p.device_id = data.device_id || data.deviceId;
-    p.point_id = data.point_id || data.pointId;
-    p.alarm_active = data.alarm_active ?? data.alarmActive ?? false;
-    p.is_awake = data.is_awake ?? data.isAwake ?? true;
-    p.is_watched = data.is_watched ?? data.isWatched ?? false;
-    p.is_locked = data.is_locked ?? data.isLocked ?? false;
-    p.is_motion = data.is_motion ?? data.isMotion ?? false;
-    p.is_wifi = data.is_wifi ?? data.isWifi ?? false;
-    p.fcm_token = data.fcm_token || data.fcmToken;
-    p.geofence_event = data.geofence_event || data.geofenceEvent;
-    p.motion_state = data.motion_state || data.motionState;
+    // 🔥 V300: Provide BOTH snake_case and camelCase to ensure Protobuf encoders/decoders find the fields.
+    // The previous 'delete' calls were causing empty fields in the app.
+    const id = data.device_id || data.deviceId;
+    p.device_id = id;
+    p.deviceId = id;
+
+    const pid = data.point_id || data.pointId;
+    p.point_id = pid;
+    p.pointId = pid;
+
+    const alarm = data.alarm_active ?? data.alarmActive ?? false;
+    p.alarm_active = alarm;
+    p.alarmActive = alarm;
+
+    const awake = data.is_awake ?? data.isAwake ?? true;
+    p.is_awake = awake;
+    p.isAwake = awake;
+
+    const watched = data.is_watched ?? data.isWatched ?? false;
+    p.is_watched = watched;
+    p.isWatched = watched;
+
+    const locked = data.is_locked ?? data.isLocked ?? false;
+    p.is_locked = locked;
+    p.isLocked = locked;
+
+    const motion = data.is_motion ?? data.isMotion ?? false;
+    p.is_motion = motion;
+    p.isMotion = motion;
+
+    const wifi = data.is_wifi ?? data.isWifi ?? false;
+    p.is_wifi = wifi;
+    p.isWifi = wifi;
+
+    const token = data.fcm_token || data.fcmToken;
+    p.fcm_token = token;
+    p.fcmToken = token;
+
+    const event = data.geofence_event || data.geofenceEvent;
+    p.geofence_event = event;
+    p.geofenceEvent = event;
+
+    const mstate = data.motion_state || data.motionState;
+    p.motion_state = mstate;
+    p.motionState = mstate;
+
     p.battery = data.battery ?? 0;
     p.speed = data.speed ?? 0;
     p.bearing = data.bearing ?? 0;
     p.accuracy = data.accuracy ?? 0;
-    p.snapped_lat = data.snapped_lat || data.snappedLat;
-    p.snapped_lon = data.snapped_lon || data.snappedLon;
-    p.visual_lat = data.visual_lat || data.visualLat;
-    p.visual_lon = data.visual_lon || data.visualLon;
-    p.watcher_name = data.watcher_name || data.watcherName;
+
+    const slat = data.snapped_lat || data.snappedLat;
+    p.snapped_lat = slat;
+    p.snappedLat = slat;
+
+    const slon = data.snapped_lon || data.snappedLon;
+    p.snapped_lon = slon;
+    p.snappedLon = slon;
+
+    const vlat = data.visual_lat || data.visualLat;
+    p.visual_lat = vlat;
+    p.visualLat = vlat;
+
+    const vlon = data.visual_lon || data.visualLon;
+    p.visual_lon = vlon;
+    p.visualLon = vlon;
+
+    const wname = data.watcher_name || data.watcherName;
+    p.watcher_name = wname;
+    p.watcherName = wname;
+
     p.sats = data.sats ?? 0;
     p.intermediate_coords = data.intermediate_coords || data.intermediateCoords || [];
 
@@ -190,22 +242,26 @@ function pushUpdateToAll(device) {
     if (device.alarm_active) console.log(`🔊 ALARM ACTIVE: ${device.device_id}`);
     if (device.accident) console.log(`🚨 ACCIDENT ALERT: ${device.device_id}`);
 
-    for (const call of grpcStreams) {
+    for (const [streamId, call] of grpcStreams) {
         try {
-            if (!call || call.destroyed) { grpcStreams.delete(call); continue; }
+            if (!call || call.destroyed) { grpcStreams.delete(streamId); continue; }
+
+            // 🔥 V301: Filtering - only send if call is interested in this device
+            if (call.device_id && call.device_id !== device.device_id) continue;
+
             const ok = call.write(response);
             if (!ok) {
                 call._pendingWrites = (call._pendingWrites || 0) + 1;
-                if (call._pendingWrites > 100) { call.end(); grpcStreams.delete(call); }
+                if (call._pendingWrites > 100) { call.end(); grpcStreams.delete(streamId); }
             } else { call._pendingWrites = 0; }
-        } catch (e) { grpcStreams.delete(call); }
+        } catch (e) { grpcStreams.delete(streamId); }
     }
 }
 
 function broadcastGeofenceReload() {
-    for (const call of grpcStreams) {
+    for (const [streamId, call] of grpcStreams) {
         try { if (!call.destroyed) call.write({ reload_geofences: true }); }
-        catch (e) { grpcStreams.delete(call); }
+        catch (e) { grpcStreams.delete(streamId); }
     }
 }
 
@@ -242,9 +298,10 @@ grpcServer.addService(trackingProto.TrackingService.service, {
         if (meta?.[0] !== API_KEY) { call.emit('error', { code: grpc.status.UNAUTHENTICATED }); return call.end(); }
         if (grpcStreams.size >= 1000) return call.end();
 
+        const streamId = crypto.randomUUID(); // 🔥 V302: Safe UUID
         call.lastActivity = Date.now();
-        grpcStreams.add(call);
-        const cleanup = () => grpcStreams.delete(call);
+        grpcStreams.set(streamId, call);
+        const cleanup = () => grpcStreams.delete(streamId);
         call.on('data', (event) => {
             if (!call || call.destroyed) return;
             call.lastActivity = Date.now();
@@ -253,7 +310,13 @@ grpcServer.addService(trackingProto.TrackingService.service, {
             const data = mapProtoToApp(update);
             const id = data.device_id?.toLowerCase();
             if (id) {
-                for (const old of grpcStreams) { if (old !== call && old.device_id === id) { try { old.end(); } catch {} grpcStreams.delete(old); } }
+                // Terminate other streams for the same device if needed?
+                // Usually one device has one active write stream.
+                for (const [sid, old] of grpcStreams) {
+                    if (sid !== streamId && old.device_id === id) {
+                        try { old.end(); } catch {} grpcStreams.delete(sid);
+                    }
+                }
                 call.device_id = id;
                 updateDevice(id, data);
                 saveDevicesSafe({ immediate: data.alarm_active || data.accident });
@@ -269,12 +332,13 @@ grpcServer.addService(trackingProto.TrackingService.service, {
 setInterval(() => {
     const now = Date.now();
     // 1. gRPC Stream Cleanup
-    for (const call of grpcStreams) { if (now - (call.lastActivity || 0) > 300000) { try { call.end(); } catch {} grpcStreams.delete(call); } }
+    for (const [sid, call] of grpcStreams) { if (now - (call.lastActivity || 0) > 300000) { try { call.end(); } catch {} grpcStreams.delete(sid); } }
 
     // 2. 🔥 Watch-State Cleanup (V297)
     // If a device hasn't been updated for 5 minutes, assume nobody is watching it anymore.
     Object.values(devices).forEach(d => {
-        if (d.is_watched && (now - (d.last_seen || 0)) > 300000) {
+        const lastSeen = d.last_seen || d.lastSeen || 0;
+        if (d.is_watched && (now - lastSeen) > 300000) {
             console.log(`🧹 AUTO-UNWATCH: ${d.device_id} (Inactivity)`);
             d.is_watched = false;
             delete d.watcher_name;
@@ -301,16 +365,25 @@ io.on('connection', (socket) => {
 // --- REST ROUTES ---
 app.use((req, res, next) => {
     if (req.path === '/' || req.path.startsWith('/socket.io')) return next();
-    if (req.headers['x-api-key'] !== API_KEY) return res.sendStatus(401);
+
+    // 🔥 V302: Timing Safe API Key Check
+    const providedKey = req.headers['x-api-key'];
+    if (!providedKey || providedKey.length !== API_KEY.length ||
+        !crypto.timingSafeEqual(Buffer.from(providedKey), Buffer.from(API_KEY))) {
+        return res.sendStatus(401);
+    }
     next();
 });
 
-app.use(bodyParser.json({ limit: '200kb' }));
-app.use(bodyParser.raw({ type: 'application/x-protobuf', limit: '200kb' }));
+// app.use(bodyParser.json({ limit: '200kb' })); // Removed global to avoid processing all routes
+// app.use(bodyParser.raw({ type: 'application/x-protobuf', limit: '200kb' }));
 
 app.get('/', (req, res) => res.send('🚀 GPS Server is running.'));
 
-app.post(['/location', '/v1/location'], safe(async (req, res) => {
+const jsonParser = bodyParser.json({ limit: '200kb' });
+const protoParser = bodyParser.raw({ type: 'application/x-protobuf', limit: '200kb' });
+
+app.post(['/location', '/v1/location'], protoParser, jsonParser, safe(async (req, res) => {
     let data = req.body;
     if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number }));
@@ -325,7 +398,7 @@ app.post(['/location', '/v1/location'], safe(async (req, res) => {
     res.sendStatus(200);
 }));
 
-app.post('/v1/location/raw', safe(async (req, res) => {
+app.post('/v1/location/raw', protoParser, safe(async (req, res) => {
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.sendStatus(400);
     const data = mapProtoToApp(LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number }));
     const id = data.device_id?.toLowerCase();
@@ -336,7 +409,7 @@ app.post('/v1/location/raw', safe(async (req, res) => {
     res.sendStatus(200);
 }));
 
-app.post(['/location/update-batch', '/v1/location/batch'], safe(async (req, res) => {
+app.post(['/location/update-batch', '/v1/location/batch'], protoParser, jsonParser, safe(async (req, res) => {
     let batch = Buffer.isBuffer(req.body) ? (LocationBatchProto.decode(req.body).updates || []).map(u => mapProtoToApp(LocationUpdateProto.toObject(u, { defaults: false, longs: Number }))) : req.body;
     const val = batchSchema.safeParse(batch);
     if (!val.success) return res.status(400).json(val.error.format());
@@ -503,7 +576,7 @@ app.post('/v1/devices/:id/proximity', safe(async (req, res) => {
 }));
 
 app.get(['/geofences', '/v1/geofences'], safe((req, res) => res.json(geofences || [])));
-app.post(['/geofences', '/v1/geofences'], safe(async (req, res) => {
+app.post(['/geofences', '/v1/geofences'], jsonParser, safe(async (req, res) => {
     if (!req.body?.id) return res.sendStatus(400);
     geofences = (geofences || []).filter(item => item.id !== req.body.id);
     geofences.push(req.body);
@@ -563,7 +636,8 @@ function saveDevicesSafe(opts = { immediate: false }) {
         if (saveTimer) clearTimeout(saveTimer);
         saveTimer = null;
         savePending = false;
-        return queueWrite(DATA_FILE, JSON.stringify(devices, null, 2))
+        const snapshot = structuredClone(devices); // 🔥 V301: Prevent race conditions
+        return queueWrite(DATA_FILE, JSON.stringify(snapshot, null, 2))
             .then(() => console.log("🔥 Critical Flush: Data persisted immediately."));
     }
 
@@ -574,7 +648,8 @@ function saveDevicesSafe(opts = { immediate: false }) {
         saveTimer = null;
         if (!savePending) return;
         savePending = false;
-        await queueWrite(DATA_FILE, JSON.stringify(devices, null, 2));
+        const snapshot = structuredClone(devices); // 🔥 V301: Prevent race conditions
+        await queueWrite(DATA_FILE, JSON.stringify(snapshot, null, 2));
         console.log("💾 Periodic Save: Device state persisted.");
     }, 10000); // 10s Puffer für normale Updates
 }
@@ -600,7 +675,7 @@ function updateDevice(id, incomingData) {
     const old = devices[id] || {};
     const data = mapProtoToApp(incomingData);
 
-    if (data.timestamp < old.timestamp) return;
+    if (data.timestamp <= old.timestamp) return; // 🔥 V301: Strict timestamp check
 
     // 🔥 IDENTITY PROTECTION: Don't overwrite meaningful names with defaults
     const isDefaultName = (name) => !name || name === "User" || name === "Jemand" || name === "Unbekannt";
@@ -610,7 +685,8 @@ function updateDevice(id, incomingData) {
     const finalFcmToken = data.fcm_token || old.fcm_token;
 
     // 🔥 ALARM SYNC: Maintain state for a short period to prevent jitter
-    const alarmActive = (old.alarm_active && !data.alarm_active && (Date.now() - (old.lastSeen || 0) < 30000)) ? true : data.alarm_active;
+    const lastSeen = old.last_seen || old.lastSeen || 0;
+    const alarmActive = (old.alarm_active && !data.alarm_active && (Date.now() - lastSeen < 30000)) ? true : data.alarm_active;
 
     // 🔥 BATTERY PROTECTION: Don't overwrite with 0 if we have an old value
     const battery = (data.battery > 0) ? data.battery : (old.battery || 0);
@@ -649,15 +725,18 @@ async function handleEvents(id, data, old) {
     if (typeof data.geofence_event === 'string' && (data.geofence_event.startsWith('enter:') || data.geofence_event.startsWith('exit:'))) {
         const key = `gf:${id}:${data.geofence_event}`;
 
-        // --- 🛡️ MEMORY PROTECTION: Clear old lastPushTimes if too large ---
+        // --- 🛡️ MEMORY PROTECTION: Clear old lastPushTimes (Smart Cleanup V301) ---
         if (Object.keys(lastPushTimes).length > 5000) {
-            console.log("🧹 Clearing lastPushTimes (Memory Protection)");
-            lastPushTimes = {};
+            console.log("🧹 Pruning lastPushTimes (Memory Protection)");
+            const cutoff = Date.now() - 5 * 60 * 1000;
+            for (const [k, v] of Object.entries(lastPushTimes)) {
+                if (v < cutoff) delete lastPushTimes[k];
+            }
         }
 
         if (Date.now() - (lastPushTimes[key] || 0) > 120000) {
             lastPushTimes[key] = Date.now();
-            const [action, ...name] = data.geofenceEvent.split(':');
+            const [action, ...name] = data.geofence_event.split(':');
             const zoneName = name.join(':') || 'Zone';
             await broadcast(id, { type: 'geofence_event', deviceId: id, zoneName: zoneName, deviceName: device.name || id, action: action === 'enter' ? 'betreten' : 'verlassen' });
         }
@@ -676,26 +755,33 @@ async function broadcast(senderId, payload) {
 
     console.log(`📣 Broadcasting ${payload.type} to ${tokens.length} devices...`);
 
+    const batches = [];
     for (let i = 0; i < tokens.length; i += 500) {
+        batches.push(tokens.slice(i, i + 500));
+    }
+
+    // 🔥 V301: Faster parallel broadcast
+    await Promise.all(batches.map(async (batch) => {
         try {
-            const res = await admin.messaging().sendEachForMulticast({ data: payload, tokens: tokens.slice(i, i + 500), android: { priority: 'high' } });
+            const res = await admin.messaging().sendEachForMulticast({ data: payload, tokens: batch, android: { priority: 'high' } });
             if (res.failureCount > 0) {
-                const failed = []; res.responses.forEach((r, idx) => {
+                res.responses.forEach((r, idx) => {
                     if (!r.success && r.error) {
                         const code = r.error.code || "";
-                        if (code.includes('not-registered') || code.includes('invalid')) failed.push(tokens[idx]);
-                    }
-                });
-                Object.values(devices).forEach(d => {
-                    const token = d.fcm_token || d.fcmToken;
-                    if (failed.includes(token)) {
-                        delete d.fcm_token;
-                        delete d.fcmToken;
+                        if (code.includes('not-registered') || code.includes('invalid')) {
+                            const token = batch[idx];
+                            Object.values(devices).forEach(d => {
+                                if (d.fcm_token === token || d.fcmToken === token) {
+                                    delete d.fcm_token;
+                                    delete d.fcmToken;
+                                }
+                            });
+                        }
                     }
                 });
             }
         } catch (e) { console.error("🚨 BCast Multicast Error:", e.message); }
-    }
+    }));
 }
 
 async function startServer() {
