@@ -332,23 +332,17 @@ let lastPushTimes = {};
 const grpcStreams = new Map();
 
 // --- gRPC HELPERS ---
-// 🔥 V318: Protobuf safely handle 0 values (?? instead of ||)
+// 🔥 V318/V322: Robust optional numeric mapping (prevent Null Island / 0 defaults)
 function mapAppToProto(data) {
     if (!data) return data;
-    const id = data.deviceId || "";
 
-    return DeviceLocationProto.create({
-        device_id: id,
-        lat: Number(data.lat) ?? 0,
-        lon: Number(data.lon) ?? 0,
-        battery: data.battery ?? 0,
-        speed: data.speed ?? 0,
-        bearing: data.bearing ?? 0,
-        timestamp: Number(data.timestamp) ?? Date.now(),
-        accuracy: data.accuracy ?? 0,
-        offline: !!data.offline,
+    // 1. Fixed required/string fields
+    const p = {
+        device_id: data.deviceId || "",
+        timestamp: data.timestamp ? Number(data.timestamp) : Date.now(),
         name: data.name || "",
         status: data.status || "online",
+        offline: !!data.offline,
         alarm_active: !!data.alarmActive,
         is_awake: !!(data.isAwake ?? true),
         is_watched: !!data.isWatched,
@@ -358,15 +352,30 @@ function mapAppToProto(data) {
         is_motion: !!data.isMotion,
         is_wifi: !!data.isWifi,
         accident: !!data.accident,
-        snapped_lat: data.snappedLat ?? 0,
-        snapped_lon: data.snappedLon ?? 0,
-        visual_lat: data.visualLat ?? 0,
-        visual_lon: data.visualLon ?? 0,
         geofence_event: data.geofenceEvent || "",
         motion_state: data.motionState || "STILL",
-        sats: data.sats ?? 0,
         intermediate_coords: data.intermediateCoords || []
-    });
+    };
+
+    // 2. Safe numeric assignment: OMIT if null, undefined, or NaN
+    const safeNum = (val) => {
+        const n = Number(val);
+        return (val != null && !isNaN(n)) ? n : undefined;
+    };
+
+    if (data.lat != null) p.lat = safeNum(data.lat);
+    if (data.lon != null) p.lon = safeNum(data.lon);
+    if (data.battery != null) p.battery = Math.round(safeNum(data.battery) || 0);
+    if (data.speed != null) p.speed = safeNum(data.speed);
+    if (data.bearing != null) p.bearing = safeNum(data.bearing);
+    if (data.accuracy != null) p.accuracy = safeNum(data.accuracy);
+    if (data.sats != null) p.sats = Math.round(safeNum(data.sats) || 0);
+    if (data.snappedLat != null) p.snapped_lat = safeNum(data.snappedLat);
+    if (data.snappedLon != null) p.snapped_lon = safeNum(data.snappedLon);
+    if (data.visualLat != null) p.visual_lat = safeNum(data.visualLat);
+    if (data.visualLon != null) p.visual_lon = safeNum(data.visualLon);
+
+    return DeviceLocationProto.create(p);
 }
 
 function mapProtoToApp(data) {
@@ -742,18 +751,18 @@ app.post(['/location/update-batch', '/v1/location/batch'], protoParser, jsonPars
     let rawUpdates = req.body;
     if (Buffer.isBuffer(req.body)) {
         const decoded = decodeProtoSafe(LocationBatchProto, req.body);
-        if (!decoded) return res.sendStatus(400);
+        if (!decoded) return res.status(400).json({ success: false, error: "Invalid Protobuf payload" });
         rawUpdates = (decoded.updates || []).map(u => mapProtoToApp(u));
     }
 
     // 🔥 V317: Batch Validation using Schema
     const parsed = batchSchema.safeParse(rawUpdates);
-    if (!parsed.success) return res.status(400).json(parsed.error.format());
+    if (!parsed.success) return res.status(400).json({ success: false, error: "Batch validation failed", details: parsed.error.format() });
 
     // 🔥 V318: Enforce single-device batch to prevent credential leaks
     const deviceIds = [...new Set(parsed.data.map(u => u.deviceId))];
     if (deviceIds.length !== 1) {
-        return res.status(400).json({ error: "Batch must contain exactly one deviceId" });
+        return res.status(400).json({ success: false, error: "Batch must contain exactly one deviceId" });
     }
 
     const deviceSecret = req.headers['x-device-token'];
