@@ -8,6 +8,7 @@ import admin from 'firebase-admin';
 import protobuf from 'protobufjs';
 import grpc from '@grpc/grpc-js';
 import protoLoader from '@grpc/proto-loader';
+import multer from 'multer'; // 🔥 V308: For Telemetry Uploads
 import path from 'path';
 import { fileURLToPath } from 'url';
 import rateLimit from 'express-rate-limit';
@@ -39,6 +40,17 @@ const PORT = process.env.PORT || 3000;
 const GRPC_PORT = process.env.GRPC_PORT || 50051;
 const DATA_FILE = path.join(__dirname, 'devices.json');
 const GEOFENCE_FILE = path.join(__dirname, 'geofences.json');
+const TELEMETRY_DIR = path.join(__dirname, 'telemetry');
+
+// --- MULTER SETUP (V308) ---
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, TELEMETRY_DIR),
+    filename: (req, file, cb) => {
+        const id = req.body.deviceId || "unknown";
+        cb(null, `telemetry_${id.toLowerCase()}.bin`);
+    }
+});
+const upload = multer({ storage });
 
 // --- PROTOBUF DEFINITION ---
 const PROTO_PATH = path.join(__dirname, 'tracking.proto');
@@ -533,6 +545,41 @@ app.post(['/devices/:id/unwatch', '/v1/devices/:id/unwatch'], safe(async (req, r
     res.sendStatus(200);
 }));
 
+// 🔥 V308: Telemetry Control Routes
+app.post(['/devices/:id/request-telemetry', '/v1/devices/:id/request-telemetry'], safe(async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const d = devices?.[id];
+    if (!d || !d.fcm_token) return res.sendStatus(404);
+
+    admin.messaging().send({
+        data: { type: 'request_telemetry', deviceId: id },
+        token: d.fcm_token,
+        android: { priority: 'high' }
+    }).then(() => console.log(`📡 Telemetry request sent to ${id}`))
+      .catch(e => console.warn(`⚠️ Telemetry Request FCM failed:`, e.message));
+
+    res.sendStatus(200);
+}));
+
+app.post(['/devices/:id/delete-telemetry', '/v1/devices/:id/delete-telemetry'], safe(async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const file = path.join(TELEMETRY_DIR, `telemetry_${id}.bin`);
+    try {
+        await fs.unlink(file);
+        console.log(`🗑️ TELEMETRY DELETED: ${id}`);
+    } catch (e) {}
+
+    const d = devices?.[id];
+    if (d?.fcm_token) {
+        admin.messaging().send({
+            data: { type: 'delete_telemetry', deviceId: id },
+            token: d.fcm_token,
+            android: { priority: 'high' }
+        }).catch(() => {});
+    }
+    res.sendStatus(200);
+}));
+
 app.post(['/devices/:id/break-lock', '/v1/devices/:id/break-lock'], safe(async (req, res) => {
     const id = req.params.id.toLowerCase();
     const d = devices?.[id];
@@ -606,6 +653,23 @@ app.post(['/location/clear/:id', '/v1/location/clear/:id'], safe(async (req, res
     // In this file-based implementation, we don't have a history list separate from 'devices'
     // but we could clear specific metadata if needed.
     res.sendStatus(200);
+}));
+
+// 🔥 V308: Telemetry Sync Routes
+app.post(['/telemetry/upload', '/v1/telemetry/upload'], upload.single('file'), safe(async (req, res) => {
+    console.log(`📤 TELEMETRY UPLOAD: ${req.body.deviceId}`);
+    res.sendStatus(200);
+}));
+
+app.get(['/telemetry/download/:id', '/v1/telemetry/download/:id'], safe(async (req, res) => {
+    const id = req.params.id.toLowerCase();
+    const file = path.join(TELEMETRY_DIR, `telemetry_${id}.bin`);
+    try {
+        await fs.access(file);
+        res.download(file);
+    } catch (e) {
+        res.status(404).send("Telemetry not found");
+    }
 }));
 
 // --- PERSISTENCE ---
