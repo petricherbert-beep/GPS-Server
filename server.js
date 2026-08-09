@@ -147,7 +147,7 @@ const locationSchema = z.object({
     geofenceEvent: z.string().max(256).optional(),
     name: z.string().max(128).optional(),
     watcherName: z.string().max(128).optional(),
-    sats: z.number().finite().int().min(0).max(100).optional(),
+    sats: z.number().finite().int().min(-1).max(100).optional(),
     isLive: z.boolean().optional(),
     snappedLat: z.number().finite().min(-90).max(90).optional(),
     snappedLon: z.number().finite().min(-180).max(180).optional(),
@@ -1215,9 +1215,10 @@ async function updateDevice(id, data, metadata = {}) {
 
     const merged = { ...old };
 
-    // 🔥 V318: Hash Device Secret if new
+    // 🔥 V318/V323: Hash Device Secret if new (Provisioning)
     if (!merged.deviceSecretHash && metadata.deviceSecret) {
         merged.deviceSecretHash = await hashSecret(metadata.deviceSecret);
+        console.log(`✅ DEVICE PROVISIONED: ${id}`);
     }
 
     for (const key in data) {
