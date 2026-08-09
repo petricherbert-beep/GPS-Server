@@ -89,10 +89,10 @@ const locationSchema = z.object({
     is_live: z.boolean().optional(),
     visual_lat: z.number().optional(),
     visual_lon: z.number().optional(),
-    intermediate_coords: z.array(z.number()).optional()
+    intermediate_coords: z.array(z.number()).max(2000).optional() // 🔥 V307: Prevent memory exhaustion
 }).refine(data => data.device_id || data.deviceId, { message: "device_id is required" });
 
-const batchSchema = z.array(locationSchema);
+const batchSchema = z.array(locationSchema).max(500); // 🔥 V307: Limit batch size to prevent OOM
 
 // --- 🛡️ HELPER: SAFE REQUEST WRAPPER ---
 const safe = fn => (req, res, next) =>
@@ -226,7 +226,8 @@ function pushUpdateToAll(device) {
             if (!call || call.destroyed) { grpcStreams.delete(streamId); continue; }
 
             // 🔥 V301: Filtering - only send if call is interested in this device
-            if (call.device_id && call.device_id !== device.device_id) continue;
+            // 🔥 V307: STRICT FILTERING - if stream hasn't identified itself, send NOTHING
+            if (!call.device_id || call.device_id !== device.device_id) continue;
 
             const ok = call.write(response);
             if (!ok) {
@@ -403,14 +404,19 @@ app.post(['/location/update-batch', '/v1/location/batch'], protoParser, jsonPars
     const val = batchSchema.safeParse(batch);
     if (!val.success) return res.status(400).json(val.error.format());
     batch = val.data;
+    const updatedIds = new Set();
     batch.forEach(item => {
         const id = (item.device_id || item.deviceId)?.toLowerCase();
-        if (id) updateDevice(id, item);
+        if (id) {
+            updateDevice(id, item);
+            updatedIds.add(id);
+        }
     });
     saveDevicesSafe();
-    if (batch.length > 0) {
-        const firstId = (batch[0].device_id || batch[0].deviceId)?.toLowerCase();
-        if (firstId && devices[firstId]) pushUpdateToAll(devices[firstId]);
+
+    // 🔥 V307: Broadcast ALL unique devices in the batch
+    for (const id of updatedIds) {
+        if (devices[id]) pushUpdateToAll(devices[id]);
     }
     res.sendStatus(200);
 }));
@@ -659,6 +665,10 @@ async function init() {
         geofences = [];
     }
 }
+
+// 🔥 V307: Centralized list of system-placeholders to prevent name overwrites
+const DEFAULT_NAMES = new Set(["User", "Jemand", "Unbekannt", "Oliver", "Nicole"]);
+const isDefaultName = (name) => !name || DEFAULT_NAMES.has(name);
 
 function updateDevice(id, incomingData) {
     const old = devices[id] || {};
