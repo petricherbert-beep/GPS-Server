@@ -36,8 +36,8 @@ if (!process.env.API_KEY) {
     process.exit(1);
 }
 const API_KEY = process.env.API_KEY;
-// 🔥 V318/V319: Required for new device registration
-const PROVISIONING_KEY = process.env.PROVISIONING_KEY;
+// 🔥 V318/V319/V320: Required for new device registration. Fallback to API_KEY if unset.
+const PROVISIONING_KEY = process.env.PROVISIONING_KEY || API_KEY;
 const PORT = process.env.PORT || 3000;
 const GRPC_PORT = process.env.GRPC_PORT || 50051;
 const DATA_FILE = path.join(__dirname, 'devices.json');
@@ -124,8 +124,8 @@ const locationSchema = z.object({
     deviceId: z.string().min(1).max(128).regex(/^[a-z0-9_-]+$/i),
     lat: z.number().finite().min(-90).max(90).optional(),
     lon: z.number().finite().min(-180).max(180).optional(),
-    // 🔥 V315: Milliseconds (10^12 is approx year 2001) with 5 min future tolerance
-    timestamp: z.number().finite().int().min(1000000000000).refine(ts => ts <= Date.now() + 300000, { message: "Timestamp too far in future" }).optional(),
+    // 🔥 V315/V320: Milliseconds (10^12 is approx year 2001) with 10 min future tolerance
+    timestamp: z.number().finite().int().min(1000000000000).refine(ts => ts <= Date.now() + 600000, { message: "Timestamp too far in future" }).optional(),
     accuracy: z.number().finite().min(0).optional(),
     speed: z.number().finite().min(0).optional(),
     bearing: z.number().finite().min(0).max(360).optional(),
@@ -234,13 +234,13 @@ async function validateAndProcessLocation(raw, metadata = {}) {
 
         if (!isAuth) {
             console.warn(`🚨 AUTH REJECTED: ${id}`);
-            return { success: false, error: "Unauthorized: Invalid Device Token or Provisioning Key" };
+            return { success: false, code: 401, error: "Unauthorized: Invalid Device Token or Provisioning Key" };
         }
 
         // 🔥 V311/V315: Stream Binding Guard
         if (metadata.authenticatedId && metadata.authenticatedId !== id) {
             console.warn(`🚨 SPOOFING ATTEMPT: ${metadata.authenticatedId} tried to update ${id}`);
-            return { success: false, error: "Unauthorized device ID" };
+            return { success: false, code: 403, error: "Unauthorized device ID" };
         }
 
         const update = await updateDevice(id, data, metadata);
@@ -651,16 +651,16 @@ app.post(['/location', '/v1/location'], protoParser, jsonParser, safe(async (req
     let raw = req.body;
     if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         raw = decodeProtoSafe(LocationUpdateProto, req.body);
-        if (!raw) return res.sendStatus(400);
+        if (!raw) return res.status(400).json({ success: false, error: "Invalid Protobuf payload" });
     }
 
     // 🔥 V318: Extract Secrets
     const deviceSecret = req.headers['x-device-token'];
     const provisioningKey = req.headers['x-provisioning-key'];
 
-    // 🔥 V311/V315: Unified Pipeline
+    // 🔥 V311/V315/V320: Unified Pipeline
     const result = await validateAndProcessLocation(raw, { deviceSecret, provisioningKey });
-    if (!result.success) return res.status(400).json(result.error);
+    if (!result.success) return res.status(result.code || 400).json({ success: false, error: result.error });
 
     if (result.updated) {
         await saveDevicesSafe({ immediate: !!(result.data.alarmActive || result.data.accident) });
@@ -701,16 +701,16 @@ app.post('/v1/device/register-fcm', jsonParser, safe(async (req, res) => {
 }));
 
 app.post('/v1/location/raw', protoParser, safe(async (req, res) => {
-    if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.sendStatus(400);
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ success: false, error: "Empty payload" });
     const raw = decodeProtoSafe(LocationUpdateProto, req.body);
-    if (!raw) return res.sendStatus(400);
+    if (!raw) return res.status(400).json({ success: false, error: "Invalid Protobuf payload" });
 
     const deviceSecret = req.headers['x-device-token'];
     const provisioningKey = req.headers['x-provisioning-key'];
 
-    // 🔥 V311/V315/V319: Unified Pipeline (Async)
+    // 🔥 V311/V315/V320: Unified Pipeline (Async Fix)
     const result = await validateAndProcessLocation(raw, { deviceSecret, provisioningKey });
-    if (!result.success) return res.status(400).json(result.error);
+    if (!result.success) return res.status(result.code || 400).json({ success: false, error: result.error });
 
     if (result.updated) {
         await saveDevicesSafe({ immediate: !!(result.data.alarmActive || result.data.accident) });
