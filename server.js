@@ -36,8 +36,8 @@ if (!process.env.API_KEY) {
     process.exit(1);
 }
 const API_KEY = process.env.API_KEY;
-// 🔥 V318/V319/V320: Required for new device registration. Fallback to API_KEY if unset.
-const PROVISIONING_KEY = process.env.PROVISIONING_KEY || API_KEY;
+// 🔥 V318/V319/V320/V321: Required for new device registration. Fallback to API_KEY if unset.
+const PROVISIONING_KEY = (process.env.PROVISIONING_KEY || API_KEY).trim();
 const PORT = process.env.PORT || 3000;
 const GRPC_PORT = process.env.GRPC_PORT || 50051;
 const DATA_FILE = path.join(__dirname, 'devices.json');
@@ -281,16 +281,20 @@ async function verifySecret(secret, storedHash) {
     });
 }
 
-// 🔥 V317/V318: Device Authentication Helper
+// 🔥 V317/V318/V321: Device Authentication Helper
 async function verifyDeviceAuth(id, secret, metadata = {}) {
     if (!id) return false;
     const device = devices[id];
 
-    // 🔥 V318: Provisioning Logic - No more implicit TOFU without Provisioning Key
+    // 🔥 V318/V321: Provisioning Logic - No implicit TOFU
+    // Allow if:
+    // 1. New device (doesn't exist)
+    // 2. Existing device without a secret hash (Legacy migration)
     if (!device || !device.deviceSecretHash) {
-        const provKey = metadata.provisioningKey || null;
+        const provKey = (metadata.provisioningKey || "").trim();
         if (!provKey || provKey !== PROVISIONING_KEY) {
-            console.warn(`🚨 REGISTRATION REJECTED: ${id} (Missing/Invalid Provisioning Key)`);
+            // Only log warning if they actually TRIED to send a key
+            if (provKey) console.warn(`🚨 REGISTRATION REJECTED: ${id} (Invalid Provisioning Key)`);
             return false;
         }
         if (!secret || secret.length < 16) {
@@ -301,7 +305,7 @@ async function verifyDeviceAuth(id, secret, metadata = {}) {
     }
 
     if (!secret) return false;
-    return await verifySecret(secret, device.deviceSecretHash);
+    return await verifySecret(secret.trim(), device.deviceSecretHash);
 }
 
 // 🔥 V317: Protobuf Safe Decoding
@@ -789,10 +793,22 @@ app.get(['/devices', '/v1/devices'], safe((req, res) => {
     res.json(publicList);
 }));
 
-app.get(['/devices/:id', '/v1/devices/:id'], safe((req, res) => {
+app.get(['/devices/:id', '/v1/devices/:id'], safe(async (req, res) => {
     const id = normalizeDeviceId(req.params.id);
     const d = id ? devices[id] : null;
     if (!d) return res.sendStatus(404);
+
+    // 🔥 V321: Differentiate Auth - allow watchers with API_KEY OR the device itself
+    const deviceToken = req.headers['x-device-token'];
+    const providedApiKey = (req.headers['x-api-key'] || "").trim();
+
+    const isWatcher = providedApiKey === API_KEY.trim();
+    const isSelf = deviceToken && (await verifyDeviceAuth(id, deviceToken));
+
+    if (!isWatcher && !isSelf) {
+        console.warn(`🔐 DEVICE GET REJECTED for ${id}`);
+        return res.sendStatus(401);
+    }
 
     const publicData = mapToPublic(d);
 
