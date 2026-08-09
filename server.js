@@ -56,19 +56,24 @@ function enqueueUpdate(deviceId, fn) {
         deviceQueues.set(id, Promise.resolve());
     }
 
-    const next = deviceQueues.get(id).then(() => fn()).catch(err => {
-        console.error(`🚨 QUEUE ERROR for ${id}:`, err);
-    });
+    // 🔥 V321: Resilience Fix - Ensure the queue always proceeds even if one task fails
+    const next = deviceQueues.get(id)
+        .catch(() => {}) // Swallow previous failure
+        .then(() => fn())
+        .catch(err => {
+            console.error(`🚨 QUEUE TASK ERROR for ${id}:`, err);
+            throw err; // Re-throw so the caller still sees the error
+        });
 
     deviceQueues.set(id, next);
 
     // Cleanup idle queues to prevent memory leak
     next.finally(() => {
         if (deviceQueues.get(id) === next) {
-            // Only delete if no one else joined the queue while we were running
+            // 🔥 V321: Faster cleanup for Render's free tier
             setTimeout(() => {
                 if (deviceQueues.get(id) === next) deviceQueues.delete(id);
-            }, 30000);
+            }, 10000);
         }
     });
 
@@ -536,28 +541,38 @@ grpcServer.addService(trackingProto.TrackingService.service, {
             const deviceToken = call.metadata.get('x-device-token')?.[0];
             const provisioningKey = call.metadata.get('x-provisioning-key')?.[0];
 
-            // 🔥 V311/V315/V317/V318: Unified Validation Pipeline with Identity Binding
-            const result = await validateAndProcessLocation(update, {
-                authenticatedId: call.deviceId,
-                deviceSecret: deviceToken,
-                provisioningKey: provisioningKey
-            });
+            // 🔥 V311/V315/V317/V318/V321: Unified Validation Pipeline
+            try {
+                const result = await validateAndProcessLocation(update, {
+                    authenticatedId: call.deviceId,
+                    deviceSecret: deviceToken,
+                    provisioningKey: provisioningKey
+                });
 
-            if (result.success) {
-                // 🔥 V315: Bind stream to device on first packet
-                if (!call.deviceId) {
-                    call.deviceId = result.id;
-                }
-
-                if (result.updated) {
-                    for (const [sid, old] of grpcStreams) {
-                        if (sid !== streamId && old.deviceId === result.id) {
-                            try { old.end(); } catch {} grpcStreams.delete(sid);
-                        }
+                if (result.success) {
+                    // 🔥 V315: Bind stream to device on first packet
+                    if (!call.deviceId) {
+                        call.deviceId = result.id;
                     }
-                    await saveDevicesSafe({ immediate: result.data.alarmActive || result.data.accident });
-                    pushUpdateToAll(result.data);
+
+                    if (result.updated) {
+                        for (const [sid, old] of grpcStreams) {
+                            if (sid !== streamId && old.deviceId === result.id) {
+                                try { old.end(); } catch {} grpcStreams.delete(sid);
+                            }
+                        }
+                        await saveDevicesSafe({ immediate: result.data.alarmActive || result.data.accident });
+                        pushUpdateToAll(result.data);
+                    }
+                } else {
+                    // 🔥 V321: Explicit gRPC Error Response
+                    console.warn(`⚠️ gRPC update rejected for ${id}: ${result.error}`);
+                    if (result.code === 401 || result.code === 403) {
+                        return call.destroy({ code: result.code === 401 ? grpc.status.UNAUTHENTICATED : grpc.status.PERMISSION_DENIED, details: result.error });
+                    }
                 }
+            } catch (err) {
+                console.error(`🔥 gRPC Internal Error for ${id}:`, err.message);
             }
         });
         call.on('end', cleanup); call.on('error', cleanup); call.on('close', cleanup);
