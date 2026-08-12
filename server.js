@@ -153,6 +153,7 @@ const locationSchema = z.object({
     snappedLon: z.number().finite().min(-180).max(180).optional(),
     visualLat: z.number().finite().min(-90).max(90).optional(),
     visualLon: z.number().finite().min(-180).max(180).optional(),
+    color: z.number().finite().int().optional(), // 🔥 V332: Custom Marker Color
     status: z.string().max(64).optional(),
     intermediateCoords: z.array(z.number().finite()).max(2000).refine(coords => coords.length % 2 === 0, { message: "Must be lat/lon pairs" }).optional()
 });
@@ -204,6 +205,7 @@ function sanitizeAndValidate(raw) {
         snappedLon: raw.snappedLon ?? raw.snapped_lon,
         visualLat: raw.visualLat ?? raw.visual_lat,
         visualLon: raw.visualLon ?? raw.visual_lon,
+        color: raw.color, // 🔥 V332
         status: raw.status,
         intermediateCoords: raw.intermediateCoords || raw.intermediate_coords
     };
@@ -354,7 +356,8 @@ function mapAppToProto(data) {
         accident: !!data.accident,
         geofence_event: data.geofenceEvent || "",
         motion_state: data.motionState || "STILL",
-        intermediate_coords: data.intermediateCoords || []
+        intermediate_coords: data.intermediateCoords || [],
+        color: data.color || 0 // 🔥 V332
     };
 
     // 2. Safe numeric assignment: OMIT if null, undefined, or NaN
@@ -406,6 +409,7 @@ function mapProtoToApp(data) {
         snappedLon: data.snappedLon || data.snapped_lon,
         visualLat: data.visualLat || data.visual_lat,
         visualLon: data.visualLon || data.visual_lon,
+        color: data.color, // 🔥 V332
         sats: data.sats ?? data.sats_count ?? data.satsInFix,
         name: data.name,
         watcherName: data.watcherName || data.watcher_name,
