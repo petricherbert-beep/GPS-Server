@@ -283,27 +283,21 @@ async function verifySecret(secret, storedHash) {
     });
 }
 
-// 🔥 V317/V318/V321: Device Authentication Helper
+// 🔥 V317/V318/V321/V334: Device Authentication Helper with Re-Provisioning support
 async function verifyDeviceAuth(id, secret, metadata = {}) {
     if (!id) return false;
     const device = devices[id];
 
-    // 🔥 V318/V321: Provisioning Logic - No implicit TOFU
-    // Allow if:
-    // 1. New device (doesn't exist)
-    // 2. Existing device without a secret hash (Legacy migration)
-    if (!device || !device.deviceSecretHash) {
-        const provKey = (metadata.provisioningKey || "").trim();
-        if (!provKey || provKey !== PROVISIONING_KEY) {
-            // Only log warning if they actually TRIED to send a key
-            if (provKey) console.warn(`🚨 REGISTRATION REJECTED: ${id} (Invalid Provisioning Key)`);
-            return false;
-        }
-        if (!secret || secret.length < 16) {
-            console.warn(`🚨 REGISTRATION REJECTED: ${id} (Secret too weak)`);
-            return false;
-        }
+    // 🔥 V334: If the correct Provisioning Key is provided, we ALWAYS allow the access.
+    // This allows devices to re-register (e.g. after cache clear) without manual server intervention.
+    const provKey = (metadata.provisioningKey || "").trim();
+    if (provKey && provKey === PROVISIONING_KEY) {
         return true;
+    }
+
+    // Standard Auth via Secret
+    if (!device || !device.deviceSecretHash) {
+        return false; // Provisioning key was required but missing/wrong (handled above)
     }
 
     if (!secret) return false;
@@ -459,6 +453,11 @@ function pushUpdateToAll(device) {
     }
     if (device.alarmActive) console.log(`🔊 ALARM ACTIVE: ${device.deviceId}`);
     if (device.accident) console.log(`🚨 ACCIDENT ALERT: ${device.deviceId}`);
+
+    const streamCount = grpcStreams.size;
+    if (streamCount > 0) {
+        console.log(`📡 BROADCAST: ${device.deviceId} to ${streamCount} streams`);
+    }
 
     for (const [streamId, call] of grpcStreams) {
         try {
@@ -937,6 +936,7 @@ app.post(['/devices/:id/watch', '/v1/devices/:id/watch'], controlAuthMiddleware,
     const d = devices[id];
     d.isWatched = true;
     d.watcherName = req.query.watcherName || req.query.watcher_name || "Jemand";
+    console.log(`👁️ WATCHING: ${id} by ${d.watcherName}`);
 
     await saveDevicesSafe({ immediate: true });
     pushUpdateToAll(d);
