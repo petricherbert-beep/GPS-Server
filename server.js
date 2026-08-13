@@ -931,7 +931,10 @@ app.post('/v1/devices/wakeup-all', safe(async (req, res) => {
 
 app.post(['/devices/:id/watch', '/v1/devices/:id/watch'], controlAuthMiddleware, safe(async (req, res) => {
     const id = normalizeDeviceId(req.params.id);
-    if (!id || !devices[id]) return res.sendStatus(404);
+    if (!id || !devices[id]) {
+        console.warn(`🚨 WATCH FAILED: Device ${id} not found. Registered IDs: ${Object.keys(devices)}`);
+        return res.sendStatus(404);
+    }
 
     const d = devices[id];
     d.isWatched = true;
