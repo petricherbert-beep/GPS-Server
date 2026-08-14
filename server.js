@@ -456,7 +456,7 @@ function pushUpdateToAll(device) {
 
     const streamCount = grpcStreams.size;
     if (streamCount > 0) {
-        console.log(`📡 BROADCAST: ${device.deviceId} to ${streamCount} streams`);
+        console.log(`📡 BROADCAST: ${device.deviceId} to ${streamCount} streams. AlarmActive: ${device.alarmActive}`);
     }
 
     for (const [streamId, call] of grpcStreams) {
@@ -479,8 +479,16 @@ function pushUpdateToAll(device) {
 
 function broadcastGeofenceReload() {
     for (const [streamId, call] of grpcStreams) {
-        try { if (!call.destroyed) call.write({ reload_geofences: true }); }
-        catch (e) { grpcStreams.delete(streamId); }
+        try {
+            if (!call.destroyed) {
+                // 🔥 V337: Enforce proper TrackingEvent envelope
+                call.write({
+                    device_id: "server",
+                    timestamp: Date.now(),
+                    server_response: { reload_geofences: true }
+                });
+            }
+        } catch (e) { grpcStreams.delete(streamId); }
     }
 }
 
@@ -544,6 +552,11 @@ grpcServer.addService(trackingProto.TrackingService.service, {
             if (!call || call.destroyed) return;
             call.lastActivity = Date.now();
             const update = event.location_update;
+
+            // 🔥 V338: Diagnostic Logging
+            const id = normalizeDeviceId(update?.deviceId || update?.device_id);
+            if (id) console.log(`📡 gRPC DATA: from ${id}. Payload: ${Object.keys(event)}`);
+
             if (!update) return;
 
             // 🔥 V318: Identity Pinning - Check if ID matches bound stream ID
@@ -644,10 +657,10 @@ io.on('connection', (socket) => {
 app.use((req, res, next) => {
     if (req.path === '/' || req.path.startsWith('/socket.io')) return next();
 
-    const providedKey = req.headers['x-api-key'];
-    const expectedKey = API_KEY;
+    const providedKey = (req.headers['x-api-key'] || "").trim();
+    const expectedKey = API_KEY.trim();
 
-    if (typeof providedKey !== 'string' || providedKey.length !== expectedKey.length) {
+    if (!providedKey || providedKey.length !== expectedKey.length) {
         return res.sendStatus(401);
     }
 
@@ -855,7 +868,11 @@ app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], controlAuthMiddleware,
     if (!id || !devices[id]) return res.sendStatus(404);
 
     const d = devices[id];
-    d.alarmActive = req.query.active === 'true';
+    const active = req.query.active === 'true';
+    d.alarmActive = active;
+
+    // 🔥 V337: Force immediate status update via all channels
+    console.log(`🔊 ALARM UPDATE: ${id} -> ${active}`);
     await saveDevicesSafe({ immediate: true });
     pushUpdateToAll(d);
 
