@@ -58,7 +58,6 @@ message DeviceLocationProto {
   bool alarm_active = 13;
   bool is_awake = 14;
   bool is_watched = 15;
-  string watcher_name = 16;
   string fcm_token = 17;
   bool is_locked = 18;
   bool is_motion = 19;
@@ -73,6 +72,7 @@ message DeviceLocationProto {
   optional int32 sats = 28;
   repeated double intermediate_coords = 29;
   optional int32 color = 30;
+  string watcher_name = 31; // Moved to avoid conflict with field 16
 }
 
 message DeviceListProto {
