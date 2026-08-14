@@ -161,19 +161,6 @@ function mapAppToProto(d) {
     });
 }
 
-function mapProtoToApp(p) {
-    if (!p) return p;
-    return {
-        deviceId: p.device_id, name: p.name, lat: p.lat, lon: p.lon, battery: p.battery, speed: p.speed, bearing: p.bearing,
-        timestamp: p.timestamp, accuracy: p.accuracy, alarmActive: p.alarm_active, isWatched: p.is_watched,
-        fcmToken: p.fcm_token, isLocked: p.is_locked, isMotion: p.is_motion, isWifi: p.is_wifi, accident: p.accident,
-        geofenceEvent: p.geofence_event, motionState: p.motion_state, sats: p.sats, snappedLat: p.snapped_lat,
-        snappedLon: p.snapped_lon, visualLat: p.visual_lat, visualLon: p.visual_lon, color: p.color,
-        isAwake: p.is_awake, status: p.status, watcherName: p.watcher_name, pointId: p.point_id,
-        offline: p.offline, intermediateCoords: p.intermediate_coords
-    };
-}
-
 function mapToPublic(d) { if (!d) return d; const { fcmToken, deviceSecretHash, ...safe } = d; return safe; }
 
 function pushUpdateToAll(device) {
@@ -246,7 +233,15 @@ app.post('/v1/device/register-fcm', bodyParser.json(), safe(async (req, res) => 
 
 app.get(['/devices', '/v1/devices'], safe((req, res) => res.json(Object.values(devices).map(mapToPublic))));
 
-app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], safe(async (req, res) => {
+async function controlAuthMiddleware(req, res, next) {
+    const id = normalizeDeviceId(req.params.id);
+    const deviceToken = req.headers['x-device-token'];
+    if (id && deviceToken && (await verifyDeviceAuth(id, deviceToken))) return next();
+    if (req.headers['x-api-key'] === API_KEY) return next();
+    res.sendStatus(401);
+}
+
+app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], controlAuthMiddleware, safe(async (req, res) => {
     const id = normalizeDeviceId(req.params.id);
     if (!id || !devices[id]) return res.sendStatus(404);
     const d = devices[id];
@@ -255,11 +250,8 @@ app.post(['/devices/:id/alarm', '/v1/devices/:id/alarm'], safe(async (req, res) 
     console.log(`🔊 ALARM: ${id} -> ${active}`);
     await saveDevicesSafe();
     pushUpdateToAll(d);
-
-    // 🔥 V343: Fix Alarm Loop - Use correct message types
     const type = active ? 'alarm' : 'stop_alarm';
     const payload = { type, deviceId: id, message: active ? "Notfall!" : "Entwarnung", deviceName: d.name || id };
-
     if (d.fcmToken) admin.messaging().send({ data: payload, token: d.fcmToken, android: { priority: 'high' } }).catch(() => {});
     Object.values(devices).forEach(t => { if (t.fcmToken && t.deviceId !== id) admin.messaging().send({ data: payload, token: t.fcmToken }).catch(() => {}); });
     res.sendStatus(200);
@@ -272,9 +264,17 @@ app.get(['/telemetry/download/:id', '/v1/telemetry/download/:id'], safe(async (r
 }));
 
 async function saveDevicesSafe() { await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2)); }
+
+async function initFirebase() {
+    try {
+        const envKey = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.firebase_service_account;
+        const sa = envKey ? JSON.parse(envKey) : JSON.parse(await fs.readFile(path.join(__dirname, 'firebase-key.json'), 'utf8'));
+        admin.initializeApp({ credential: admin.credential.cert(sa) });
+    } catch (e) { console.error("Firebase fail:", e); }
+}
+
 async function init() {
     try { await fs.mkdir(TELEMETRY_DIR, { recursive: true }); devices = JSON.parse(await fs.readFile(DATA_FILE, 'utf8')); } catch (e) { devices = {}; }
-    try { geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8')); } catch (e) { geofences = []; }
 }
 
 async function updateDevice(id, data) {
