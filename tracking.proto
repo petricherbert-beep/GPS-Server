@@ -2,83 +2,63 @@ syntax = "proto3";
 
 package tracking;
 
-option java_package = "com.example.gpstrackingapp.proto";
-option java_multiple_files = true;
-
-// 🔥 UNIFIED SCHEMA V342 - MIRROR ALIGNMENT
+// 🔥 STABLE SCHEMA V344
+// Core fields are FIXED and REQUIRED (no optional) at the start to ensure alignment.
 
 message LocationUpdateProto {
   string device_id = 1;
-  string name = 2;
-  double lat = 3;
-  double lon = 4;
-  optional int32 battery = 5;
-  optional float speed = 6;
-  optional float bearing = 7;
-  int64 timestamp = 8;
-  optional float accuracy = 9;
-  optional float temperature = 10;
-  bool alarm_active = 11;
-  bool is_watched = 12;
+  double lat = 2;
+  double lon = 3;
+  int64 timestamp = 4;
+  float speed = 5;
+  float bearing = 6;
+  float accuracy = 7;
+  int32 battery = 8;
+  bool alarm_active = 9;
+  bool is_watched = 10;
+  bool is_locked = 11;
+  string name = 12;
   string fcm_token = 13;
-  bool is_locked = 14;
-  bool is_motion = 15;
-  bool is_wifi = 16;
-  bool accident = 17;
-  string geofence_event = 18;
-  string motion_state = 19;
-  optional int32 sats = 20;
-  optional double snapped_lat = 21;
-  optional double snapped_lon = 22;
-  optional double visual_lat = 23;
-  optional double visual_lon = 24;
-  optional int32 color = 25;
-  bool is_awake = 26;
-  string status = 27;
-  string watcher_name = 28;
-  string point_id = 29;
-  bool offline = 30;
+  string geofence_event = 14;
+  string motion_state = 15;
+  int32 sats = 16;
+  double visual_lat = 17;
+  double visual_lon = 18;
+  int32 color = 19;
 
   // Specific to Update
-  optional int32 proximity_distance = 31;
-  optional bool proximity_enabled = 32;
-  repeated double intermediate_coords = 33;
+  string point_id = 20;
+  bool is_awake = 21;
+  float temperature = 22;
+  repeated double intermediate_coords = 23;
 }
 
 message DeviceLocationProto {
   string device_id = 1;
-  string name = 2;
-  double lat = 3;
-  double lon = 4;
-  optional int32 battery = 5;
-  optional float speed = 6;
-  optional float bearing = 7;
-  int64 timestamp = 8;
-  optional float accuracy = 9;
-  optional float temperature = 10;
-  bool alarm_active = 11;
-  bool is_watched = 12;
+  double lat = 2;
+  double lon = 3;
+  int64 timestamp = 4;
+  float speed = 5;
+  float bearing = 6;
+  float accuracy = 7;
+  int32 battery = 8;
+  bool alarm_active = 9;
+  bool is_watched = 10;
+  bool is_locked = 11;
+  string name = 12;
   string fcm_token = 13;
-  bool is_locked = 14;
-  bool is_motion = 15;
-  bool is_wifi = 16;
-  bool accident = 17;
-  string geofence_event = 18;
-  string motion_state = 19;
-  optional int32 sats = 20;
-  optional double snapped_lat = 21;
-  optional double snapped_lon = 22;
-  optional double visual_lat = 23;
-  optional double visual_lon = 24;
-  optional int32 color = 25;
-  bool is_awake = 26;
-  string status = 27;
-  string watcher_name = 28;
-  string point_id = 29;
-  bool offline = 30;
+  string geofence_event = 14;
+  string motion_state = 15;
+  int32 sats = 16;
+  double visual_lat = 17;
+  double visual_lon = 18;
+  int32 color = 19;
 
   // Specific to Device
-  repeated double intermediate_coords = 33;
+  bool offline = 20;
+  string status = 21;
+  string watcher_name = 22;
+  repeated double intermediate_coords = 23;
 }
 
 message LocationBatchProto {
