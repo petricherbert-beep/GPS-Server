@@ -2,8 +2,10 @@ syntax = "proto3";
 
 package tracking;
 
-// 🔥 MASTER SCHEMA V345 - DO NOT CHANGE INDICES
-// This schema is the absolute source of truth for App and Server.
+option java_package = "com.example.gpstrackingapp.proto";
+option java_multiple_files = true;
+
+// 🔥 STABLE MASTER SCHEMA V346
 
 message LocationUpdateProto {
   string device_id = 1;
@@ -25,15 +27,17 @@ message LocationUpdateProto {
   double visual_lat = 17;
   double visual_lon = 18;
   int32 color = 19;
+  bool offline = 20;
+  string status = 21;
+  string watcher_name = 22;
 
-  // Extra Fields
-  string point_id = 20;
-  bool is_awake = 21;
-  float temperature = 22;
-  double snapped_lat = 23;
-  double snapped_lon = 24;
-  string watcher_name = 25;
-  repeated double intermediate_coords = 26;
+  // Extension slots
+  string point_id = 30;
+  bool is_awake = 31;
+  float temperature = 32;
+  double snapped_lat = 33;
+  double snapped_lon = 34;
+  repeated double intermediate_coords = 35;
 }
 
 message DeviceLocationProto {
@@ -56,12 +60,12 @@ message DeviceLocationProto {
   double visual_lat = 17;
   double visual_lon = 18;
   int32 color = 19;
-
-  // Status Fields
   bool offline = 20;
   string status = 21;
   string watcher_name = 22;
-  repeated double intermediate_coords = 23;
+
+  // Shared extension slots
+  repeated double intermediate_coords = 35;
 }
 
 message LocationBatchProto {
