@@ -560,7 +560,6 @@ grpcServer.addService(trackingProto.TrackingService.service, {
             if (!update) return;
 
             // 🔥 V318: Identity Pinning - Check if ID matches bound stream ID
-            const id = normalizeDeviceId(update.deviceId || update.device_id);
             if (call.deviceId && call.deviceId !== id) {
                 console.warn(`🚨 gRPC IDENTITY BREACH: Stream bound to ${call.deviceId} received data for ${id}`);
                 return call.destroy({ code: grpc.status.INVALID_ARGUMENT, details: "Stream identity bound to different deviceId" });
@@ -1138,13 +1137,13 @@ app.get(['/telemetry/download/:id', '/v1/telemetry/download/:id'], safe(async (r
 
     // 🔥 V319: Security - Telemetry download requires OWN device token or ADMIN api key
     const deviceToken = req.headers['x-device-token'];
-    const apiKey = req.headers['x-api-key'];
+    const apiKey = (req.headers['x-api-key'] || "").trim();
 
     const isOwnDevice = deviceToken && (await verifyDeviceAuth(id, deviceToken));
-    const isAdmin = apiKey === API_KEY;
+    const isAdmin = apiKey === API_KEY.trim();
 
     if (!isOwnDevice && !isAdmin) {
-        console.warn(`🔐 TELEMETRY DOWNLOAD REJECTED for ${id}`);
+        console.warn(`🔐 TELEMETRY DOWNLOAD REJECTED for ${id}. isAdmin=${isAdmin}, isOwnDevice=${!!isOwnDevice}`);
         return res.sendStatus(401);
     }
 
