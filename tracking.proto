@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package tracking;
 
+option java_package = "com.example.gpstrackingapp.proto";
+option java_multiple_files = true;
+
 message LocationUpdateProto {
   string point_id = 1;
   string device_id = 2;
@@ -31,6 +34,8 @@ message LocationUpdateProto {
   optional double visual_lon = 26;
   string motion_state = 27;
   optional int32 sats = 28;
+  repeated double intermediate_coords = 29;
+  optional int32 color = 30;
 }
 
 message LocationBatchProto {
@@ -59,13 +64,15 @@ message DeviceLocationProto {
   bool is_motion = 19;
   bool is_wifi = 20;
   bool accident = 21;
-  optional double snapped_lat = 22;
-  optional double snapped_lon = 23;
-  optional double visual_lat = 26;
-  optional double visual_lon = 27;
-  string geofence_event = 24;
-  string motion_state = 25;
+  optional double snapped_lat = 23;
+  optional double snapped_lon = 24;
+  optional double visual_lat = 25;
+  optional double visual_lon = 26;
+  string geofence_event = 16;
+  string motion_state = 27;
   optional int32 sats = 28;
+  repeated double intermediate_coords = 29;
+  optional int32 color = 30;
 }
 
 message DeviceListProto {
@@ -83,7 +90,6 @@ message TrackingResponse {
   }
 }
 
-// 🔥 ENVELOPE DESIGN
 message TrackingEvent {
   string device_id = 1;
   int64 timestamp = 2;
