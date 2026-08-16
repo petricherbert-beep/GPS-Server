@@ -21,11 +21,13 @@ const API_KEY = (process.env.API_KEY || "test").trim();
 const PORT = process.env.PORT || 3000;
 const GRPC_PORT = process.env.GRPC_PORT || 50051;
 const DATA_FILE = path.join(__dirname, 'devices.json');
+const GEOFENCE_FILE = path.join(__dirname, 'geofences.json');
 
 let devices = {};
+let geofences = {};
 const grpcStreams = new Map();
 
-// --- PROTOBUF (V357 Aligned with tracking. Namespace) ---
+// --- PROTOBUF (V357 Aligned) ---
 const PROTO_PATH = path.join(__dirname, 'tracking.proto');
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, { keepCase: true, longs: Number, enums: String, defaults: false, oneofs: true });
 const trackingProto = grpc.loadPackageDefinition(packageDefinition).tracking;
@@ -39,7 +41,6 @@ function normalizeId(id) { return id ? id.trim().toLowerCase() : null; }
 function hasValue(v) { return v !== undefined && v !== null && v !== ''; }
 function bool(v) { return !!v; }
 
-// --- MAPPING (V357 Aligned) ---
 function mapToProto(d = {}) {
     const msg = {
         device_id: d.device_id || d.deviceId || "",
@@ -59,8 +60,6 @@ function mapToProto(d = {}) {
         point_id: d.point_id || d.pointId || "",
         intermediate_coords: Array.isArray(d.intermediate_coords) ? d.intermediate_coords.map(Number) : []
     };
-
-    // Explicit Presence for Optional Fields
     if (hasValue(d.battery)) msg.battery = Math.round(Number(d.battery));
     if (hasValue(d.speed)) msg.speed = Number(d.speed);
     if (hasValue(d.bearing)) msg.bearing = Number(d.bearing);
@@ -71,14 +70,23 @@ function mapToProto(d = {}) {
     if (hasValue(d.visual_lon || d.visualLon)) msg.visual_lon = Number(d.visual_lon || d.visualLon);
     if (hasValue(d.color)) msg.color = Math.round(Number(d.color));
     if (hasValue(d.timestamp)) msg.timestamp = Number(d.timestamp);
-
     return DeviceLocationProto.create(msg);
 }
 
-function pushUpdate(device) {
-    const pub = { ...device }; delete pub.deviceSecretHash;
-    io.to(device.deviceId).emit('location_update', pub);
-    const response = { device_id: device.deviceId, timestamp: Date.now(), server_response: { device: mapToProto(device) } };
+function pushUpdate(device, signal = null) {
+    if (device) {
+        const pub = { ...device }; delete pub.deviceSecretHash;
+        io.to(device.deviceId).emit('location_update', pub);
+    }
+    if (signal === 'reload_geofences') io.emit('reload_geofences', true);
+
+    const response = {
+        device_id: device ? device.deviceId : "system",
+        timestamp: Date.now(),
+        server_response: signal === 'reload_geofences' ? { reload_geofences: true } : (device ? { device: mapToProto(device) } : null)
+    };
+    if (!response.server_response) return;
+
     for (const [sid, call] of grpcStreams) {
         try { if (!call.destroyed) call.write(response); else grpcStreams.delete(sid); }
         catch(e){ grpcStreams.delete(sid); }
@@ -89,6 +97,14 @@ async function updateDevice(id, data) {
     const old = devices[id] || {};
     devices[id] = { ...old, ...data, deviceId: id, lastSeen: Date.now() };
     return devices[id];
+}
+
+async function sendFcm(targetId, payload) {
+    const dev = devices[targetId];
+    if (dev?.fcmToken) {
+        try { await admin.messaging().send({ data: payload, token: dev.fcmToken, android: { priority: 'high' } }); }
+        catch(e) { console.error(`FCM Failed for ${targetId}`); }
+    }
 }
 
 // --- SERVER ---
@@ -102,6 +118,14 @@ app.use((req, res, next) => {
     next();
 });
 
+// Devices
+app.get('/v1/devices', (req, res) => res.json(Object.values(devices)));
+app.get('/v1/devices/:id', (req, res) => {
+    const id = normalizeId(req.params.id);
+    if (id && devices[id]) res.json(devices[id]);
+    else res.sendStatus(404);
+});
+
 app.post('/v1/location', bodyParser.raw({ type: 'application/x-protobuf' }), bodyParser.json(), async (req, res) => {
     try {
         let raw = req.body;
@@ -112,14 +136,7 @@ app.post('/v1/location', bodyParser.raw({ type: 'application/x-protobuf' }), bod
     } catch(e){ res.sendStatus(400); }
 });
 
-app.post('/v1/device/register-fcm', bodyParser.json(), async (req, res) => {
-    const id = normalizeId(req.body.deviceId);
-    if (id) { if(!devices[id]) devices[id] = { deviceId: id, status: 'online' }; devices[id].fcmToken = req.body.fcmToken; await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2)); }
-    res.sendStatus(200);
-});
-
-app.get('/v1/devices', (req, res) => res.json(Object.values(devices)));
-
+// Control
 app.post('/v1/devices/:id/alarm', async (req, res) => {
     const id = normalizeId(req.params.id);
     if (id && devices[id]) {
@@ -127,9 +144,75 @@ app.post('/v1/devices/:id/alarm', async (req, res) => {
         if (devices[id].alarmActive !== active) {
             devices[id].alarmActive = active; pushUpdate(devices[id]);
             const p = { type: active ? 'alarm' : 'stop_alarm', deviceId: id, message: active ? "Alarm!" : "Stop" };
-            if (devices[id].fcmToken) admin.messaging().send({ data: p, token: devices[id].fcmToken, android: { priority: 'high' } }).catch(()=>{});
-            Object.values(devices).forEach(t => { if(t.fcmToken && t.deviceId !== id) admin.messaging().send({ data: p, token: t.fcmToken }).catch(()=>{}); });
+            sendFcm(id, p);
+            Object.values(devices).forEach(t => { if(t.fcmToken && t.deviceId !== id) sendFcm(t.deviceId, p); });
         }
+    }
+    res.sendStatus(200);
+});
+
+app.post('/v1/devices/:id/wakeup', async (req, res) => {
+    const id = normalizeId(req.params.id);
+    if (id) sendFcm(id, { type: 'wakeup', deviceId: id });
+    res.sendStatus(200);
+});
+
+app.post('/v1/devices/wakeup-all', async (req, res) => {
+    Object.keys(devices).forEach(id => sendFcm(id, { type: 'wakeup', deviceId: id }));
+    res.sendStatus(200);
+});
+
+app.post('/v1/devices/:id/break-lock', async (req, res) => {
+    const id = normalizeId(req.params.id);
+    if (id) {
+        await updateDevice(id, { forceUnlock: true });
+        sendFcm(id, { type: 'break_lock', deviceId: id });
+    }
+    res.sendStatus(200);
+});
+
+app.post('/v1/devices/:id/watch', async (req, res) => {
+    const id = normalizeId(req.params.id);
+    const watcherId = req.query.watcherId;
+    if (id && devices[id]) {
+        devices[id].isWatched = true;
+        devices[id].watcherName = req.query.watcherName || "Oliver";
+        pushUpdate(devices[id]);
+        sendFcm(id, { type: 'wakeup', deviceId: id, reason: 'watched' });
+    }
+    res.sendStatus(200);
+});
+
+app.post('/v1/devices/:id/unwatch', async (req, res) => {
+    const id = normalizeId(req.params.id);
+    if (id && devices[id]) { devices[id].isWatched = false; pushUpdate(devices[id]); }
+    res.sendStatus(200);
+});
+
+app.post('/v1/devices/:id/proximity', bodyParser.json(), async (req, res) => {
+    const id = normalizeId(req.params.id);
+    const otherId = normalizeId(req.query.otherId);
+    if (id && otherId) console.log(`Proximity: ${id} <-> ${otherId} (${req.query.distance}m)`);
+    res.sendStatus(200);
+});
+
+// Geofences
+app.get('/v1/geofences', (req, res) => res.json(Object.values(geofences)));
+app.post('/v1/geofences', bodyParser.json(), async (req, res) => {
+    const gf = req.body;
+    if (gf && gf.id) {
+        geofences[gf.id] = gf;
+        await fs.writeFile(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+        pushUpdate(null, 'reload_geofences');
+        res.sendStatus(200);
+    } else res.sendStatus(400);
+});
+app.delete('/v1/geofences/:id', async (req, res) => {
+    const id = req.params.id;
+    if (id && geofences[id]) {
+        delete geofences[id];
+        await fs.writeFile(GEOFENCE_FILE, JSON.stringify(geofences, null, 2));
+        pushUpdate(null, 'reload_geofences');
     }
     res.sendStatus(200);
 });
@@ -152,6 +235,7 @@ grpcServer.addService(trackingProto.TrackingService.service, {
             if (id) { const dev = await updateDevice(id, up); pushUpdate(dev); }
         });
         call.on('end', () => grpcStreams.delete(sid));
+        call.on('error', () => grpcStreams.delete(sid));
     }
 });
 
@@ -164,6 +248,7 @@ async function initFirebase() {
 
 async function start() {
     try { devices = JSON.parse(await fs.readFile(DATA_FILE, 'utf8')); } catch(e){ devices = {}; }
+    try { geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8')); } catch(e){ geofences = {}; }
     await initFirebase();
     server.listen(PORT, () => console.log(`🚀 Port ${PORT}`));
     grpcServer.bindAsync(`0.0.0.0:${GRPC_PORT}`, grpc.ServerCredentials.createInsecure(), (err, port) => {
