@@ -2,38 +2,38 @@ syntax = "proto3";
 
 package tracking;
 
-// 🔥 MIRROR SCHEMA V352 - TOTAL ALIGNMENT
-// Shared fields MUST use identical indices.
+option java_package = "com.example.gpstrackingapp.proto";
+option java_multiple_files = true;
+
+// 🔥 MASTER SCHEMA V357 - FULL OPTIONAL SUPPORT
 
 message LocationUpdateProto {
   string device_id = 1;
   string name = 2;
   double lat = 3;
   double lon = 4;
-  int32 battery = 5;
+  optional int32 battery = 5;
   bool alarm_active = 6;
   bool is_locked = 7;
-  float speed = 8;
-  float bearing = 9;
+  optional float speed = 8;
+  optional float bearing = 9;
   int64 timestamp = 10;
-  float accuracy = 11;
+  optional float accuracy = 11;
   bool is_watched = 12;
   string fcm_token = 13;
   string geofence_event = 14;
   string motion_state = 15;
-  int32 sats = 16;
-  double visual_lat = 17;
-  double visual_lon = 18;
-  int32 color = 19;
-  string point_id = 20;
-  bool is_awake = 21;
-  float temperature = 22;
-  double snapped_lat = 23;
-  double snapped_lon = 24;
-  string watcher_name = 25;
-  bool offline = 26;
-  string status = 27;
-  repeated double intermediate_coords = 28;
+  optional int32 sats = 16;
+  optional double visual_lat = 17;
+  optional double visual_lon = 18;
+  optional int32 color = 19;
+  bool offline = 20;
+  string status = 21;
+  string watcher_name = 22;
+  bool is_awake = 23;
+  optional float temperature = 24;
+  string point_id = 25;
+  repeated double intermediate_coords = 26;
 }
 
 message DeviceLocationProto {
@@ -41,30 +41,28 @@ message DeviceLocationProto {
   string name = 2;
   double lat = 3;
   double lon = 4;
-  int32 battery = 5;
+  optional int32 battery = 5;
   bool alarm_active = 6;
   bool is_locked = 7;
-  float speed = 8;
-  float bearing = 9;
+  optional float speed = 8;
+  optional float bearing = 9;
   int64 timestamp = 10;
-  float accuracy = 11;
+  optional float accuracy = 11;
   bool is_watched = 12;
   string fcm_token = 13;
   string geofence_event = 14;
   string motion_state = 15;
-  int32 sats = 16;
-  double visual_lat = 17;
-  double visual_lon = 18;
-  int32 color = 19;
-  string point_id = 20;
-  bool is_awake = 21;
-  float temperature = 22;
-  double snapped_lat = 23;
-  double snapped_lon = 24;
-  string watcher_name = 25;
-  bool offline = 26;
-  string status = 27;
-  repeated double intermediate_coords = 28;
+  optional int32 sats = 16;
+  optional double visual_lat = 17;
+  optional double visual_lon = 18;
+  optional int32 color = 19;
+  bool offline = 20;
+  string status = 21;
+  string watcher_name = 22;
+  bool is_awake = 23;
+  optional float temperature = 24;
+  string point_id = 25;
+  repeated double intermediate_coords = 26;
 }
 
 message LocationBatchProto {
