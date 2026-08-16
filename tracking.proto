@@ -2,10 +2,8 @@ syntax = "proto3";
 
 package tracking;
 
-option java_package = "com.example.gpstrackingapp.proto";
-option java_multiple_files = true;
-
-// 🔥 STABLE MASTER SCHEMA V346
+// 🔥 MIRROR SCHEMA V352 - TOTAL ALIGNMENT
+// Shared fields MUST use identical indices.
 
 message LocationUpdateProto {
   string device_id = 1;
@@ -13,13 +11,13 @@ message LocationUpdateProto {
   double lat = 3;
   double lon = 4;
   int32 battery = 5;
-  float speed = 6;
-  float bearing = 7;
-  int64 timestamp = 8;
-  float accuracy = 9;
-  bool alarm_active = 10;
-  bool is_watched = 11;
-  bool is_locked = 12;
+  bool alarm_active = 6;
+  bool is_locked = 7;
+  float speed = 8;
+  float bearing = 9;
+  int64 timestamp = 10;
+  float accuracy = 11;
+  bool is_watched = 12;
   string fcm_token = 13;
   string geofence_event = 14;
   string motion_state = 15;
@@ -27,17 +25,15 @@ message LocationUpdateProto {
   double visual_lat = 17;
   double visual_lon = 18;
   int32 color = 19;
-  bool offline = 20;
-  string status = 21;
-  string watcher_name = 22;
-
-  // Extension slots
-  string point_id = 30;
-  bool is_awake = 31;
-  float temperature = 32;
-  double snapped_lat = 33;
-  double snapped_lon = 34;
-  repeated double intermediate_coords = 35;
+  string point_id = 20;
+  bool is_awake = 21;
+  float temperature = 22;
+  double snapped_lat = 23;
+  double snapped_lon = 24;
+  string watcher_name = 25;
+  bool offline = 26;
+  string status = 27;
+  repeated double intermediate_coords = 28;
 }
 
 message DeviceLocationProto {
@@ -46,13 +42,13 @@ message DeviceLocationProto {
   double lat = 3;
   double lon = 4;
   int32 battery = 5;
-  float speed = 6;
-  float bearing = 7;
-  int64 timestamp = 8;
-  float accuracy = 9;
-  bool alarm_active = 10;
-  bool is_watched = 11;
-  bool is_locked = 12;
+  bool alarm_active = 6;
+  bool is_locked = 7;
+  float speed = 8;
+  float bearing = 9;
+  int64 timestamp = 10;
+  float accuracy = 11;
+  bool is_watched = 12;
   string fcm_token = 13;
   string geofence_event = 14;
   string motion_state = 15;
@@ -60,12 +56,15 @@ message DeviceLocationProto {
   double visual_lat = 17;
   double visual_lon = 18;
   int32 color = 19;
-  bool offline = 20;
-  string status = 21;
-  string watcher_name = 22;
-
-  // Shared extension slots
-  repeated double intermediate_coords = 35;
+  string point_id = 20;
+  bool is_awake = 21;
+  float temperature = 22;
+  double snapped_lat = 23;
+  double snapped_lon = 24;
+  string watcher_name = 25;
+  bool offline = 26;
+  string status = 27;
+  repeated double intermediate_coords = 28;
 }
 
 message LocationBatchProto {
