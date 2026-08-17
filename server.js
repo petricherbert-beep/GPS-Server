@@ -12,6 +12,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import compression from 'compression';
+import multer from 'multer';
 
 process.on("uncaughtException", (err) => { console.error("💥 CRASH:", err); process.exit(1); });
 const __filename = fileURLToPath(import.meta.url);
@@ -22,12 +23,16 @@ const PORT = process.env.PORT || 3000;
 const GRPC_PORT = process.env.GRPC_PORT || 50051;
 const DATA_FILE = path.join(__dirname, 'devices.json');
 const GEOFENCE_FILE = path.join(__dirname, 'geofences.json');
+const TELEMETRY_DIR = path.join(__dirname, 'telemetry');
+
+// Ensure directories
+await fs.mkdir(TELEMETRY_DIR, { recursive: true }).catch(() => {});
 
 let devices = {};
 let geofences = {};
 const grpcStreams = new Map();
 
-// --- PROTOBUF (V357 Aligned) ---
+// --- PROTOBUF (V362 Master Schema) ---
 const PROTO_PATH = path.join(__dirname, 'tracking.proto');
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, { keepCase: true, longs: Number, enums: String, defaults: false, oneofs: true });
 const trackingProto = grpc.loadPackageDefinition(packageDefinition).tracking;
@@ -35,6 +40,7 @@ const root = protobuf.parse(await fs.readFile(PROTO_PATH, 'utf8')).root;
 
 const LocationUpdateProto = root.lookupType("tracking.LocationUpdateProto");
 const DeviceLocationProto = root.lookupType("tracking.DeviceLocationProto");
+const LocationBatchProto = root.lookupType("tracking.LocationBatchProto");
 
 // --- HELPERS ---
 function normalizeId(id) { return id ? id.trim().toLowerCase() : null; }
@@ -107,13 +113,23 @@ async function sendFcm(targetId, payload) {
     }
 }
 
+// --- STORAGE & MULTIPART ---
+const storage = multer.diskStorage({
+    destination: TELEMETRY_DIR,
+    filename: (req, file, cb) => {
+        const devId = normalizeId(req.headers['x-device-id']) || "unknown";
+        cb(null, `telemetry_${devId}_${Date.now()}.bin`);
+    }
+});
+const upload = multer({ storage });
+
 // --- SERVER ---
 const app = express();
 app.use(cors());
 app.use(compression());
 
 app.use((req, res, next) => {
-    if (req.path === '/' || req.path.startsWith('/socket.io')) return next();
+    if (req.path === '/' || req.path.startsWith('/socket.io') || req.path.startsWith('/v1/telemetry/download')) return next();
     if ((req.headers['x-api-key'] || "").trim() !== API_KEY) return res.sendStatus(401);
     next();
 });
@@ -126,7 +142,8 @@ app.get('/v1/devices/:id', (req, res) => {
     else res.sendStatus(404);
 });
 
-app.post('/v1/location', bodyParser.raw({ type: 'application/x-protobuf' }), bodyParser.json(), async (req, res) => {
+// Location Updates
+app.post('/v1/location', bodyParser.raw({ type: 'application/x-protobuf', limit: '1mb' }), bodyParser.json(), async (req, res) => {
     try {
         let raw = req.body;
         if (Buffer.isBuffer(req.body)) raw = LocationUpdateProto.toObject(LocationUpdateProto.decode(req.body), { defaults: false, longs: Number });
@@ -135,6 +152,26 @@ app.post('/v1/location', bodyParser.raw({ type: 'application/x-protobuf' }), bod
         res.sendStatus(200);
     } catch(e){ res.sendStatus(400); }
 });
+
+app.post('/v1/location/batch', bodyParser.raw({ type: 'application/x-protobuf', limit: '5mb' }), async (req, res) => {
+    try {
+        const decoded = LocationBatchProto.decode(req.body);
+        const batch = LocationBatchProto.toObject(decoded, { defaults: false, longs: Number });
+        if (batch.updates) {
+            for (const up of batch.updates) {
+                const id = normalizeId(up.device_id || up.deviceId);
+                if (id) await updateDevice(id, up);
+            }
+            await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2));
+            // Trigger UI update for the last point in batch
+            const last = batch.updates[batch.updates.length - 1];
+            pushUpdate(devices[normalizeId(last.device_id || last.deviceId)]);
+        }
+        res.sendStatus(200);
+    } catch(e){ res.sendStatus(400); }
+});
+
+app.post('/v1/location/clear/:id', (req, res) => res.sendStatus(200)); // Stub
 
 // Control
 app.post('/v1/devices/:id/alarm', async (req, res) => {
@@ -164,9 +201,10 @@ app.post('/v1/devices/wakeup-all', async (req, res) => {
 
 app.post('/v1/devices/:id/break-lock', async (req, res) => {
     const id = normalizeId(req.params.id);
-    if (id) {
-        await updateDevice(id, { forceUnlock: true });
+    if (id && devices[id]) {
+        await updateDevice(id, { forceUnlock: true, isLocked: false, alarmActive: false });
         sendFcm(id, { type: 'break_lock', deviceId: id });
+        pushUpdate(devices[id]); // Immediate broadcast of new state
     }
     res.sendStatus(200);
 });
@@ -189,10 +227,16 @@ app.post('/v1/devices/:id/unwatch', async (req, res) => {
     res.sendStatus(200);
 });
 
-app.post('/v1/devices/:id/proximity', bodyParser.json(), async (req, res) => {
-    const id = normalizeId(req.params.id);
-    const otherId = normalizeId(req.query.otherId);
-    if (id && otherId) console.log(`Proximity: ${id} <-> ${otherId} (${req.query.distance}m)`);
+// Telemetry
+app.post('/v1/telemetry/upload', upload.single('file'), (req, res) => res.sendStatus(200));
+app.get('/v1/telemetry/download/:id', async (req, res) => {
+    const files = await fs.readdir(TELEMETRY_DIR);
+    const target = files.sort().reverse().find(f => f.includes(`telemetry_${normalizeId(req.params.id)}`));
+    if (target) res.sendFile(path.join(TELEMETRY_DIR, target));
+    else res.sendStatus(404);
+});
+app.post('/v1/devices/:id/request-telemetry', (req, res) => {
+    sendFcm(normalizeId(req.params.id), { type: 'request_telemetry' });
     res.sendStatus(200);
 });
 
