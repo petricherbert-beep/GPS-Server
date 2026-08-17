@@ -15,11 +15,12 @@ import compression from 'compression';
 import multer from 'multer';
 
 /**
- * 🔥 V373: Structural Stability & Contract Alignment
- * - Persistence Migration (camelCase to snake_case) with immediate write.
- * - Socket.IO camelCase Contract for client compatibility.
- * - Restored Alarm Semantics (Target Siren vs. Remote Notification).
- * - Robust gRPC Authentication & Payload Verification.
+ * 🔥 V374: Structural Stability & Contract Hardening
+ * - Persistence Migration (camelCase to snake_case) on startup with immediate write.
+ * - Smart Merging: Only update provided fields; protect name/fcm_token from null overwrite.
+ * - Socket.IO camelCase Contract: Restored for client compatibility.
+ * - Alarm Semantics: Siren for target, Notification for remote devices.
+ * - Robust gRPC: Proper error status (UNAUTHENTICATED) and identity checks.
  */
 
 process.on("uncaughtException", (err) => { console.error("💥 UNCAUGHT EXCEPTION:", err); });
@@ -39,6 +40,7 @@ await fs.mkdir(TELEMETRY_DIR, { recursive: true }).catch(() => {});
 
 let devices = {};
 let geofences = {};
+let firebaseReady = false;
 const grpcStreams = new Map();
 
 // --- PROTOBUF ---
@@ -55,7 +57,12 @@ const TrackingEventProto = root.lookupType("tracking.TrackingEvent");
 // --- HELPERS ---
 function normalizeId(id) { return id ? id.trim().toLowerCase() : null; }
 function hasValue(v) { return v !== undefined && v !== null && v !== ''; }
-function bool(v) { return !!v; }
+
+function robustBool(v) {
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') return v.toLowerCase() === 'true';
+    return Number(v) === 1;
+}
 
 async function saveDevices() {
     try { await fs.writeFile(DATA_FILE, JSON.stringify(devices, null, 2)); }
@@ -88,48 +95,77 @@ function toClientDevice(d = {}) {
         pointId: d.point_id || "",
         intermediateCoords: Array.isArray(d.intermediate_coords) ? d.intermediate_coords : [],
         color: d.color,
-        timestamp: d.timestamp
+        timestamp: d.timestamp,
+        lastSeen: d.lastSeen
     };
 }
 
-function normalizeToSchema(raw = {}) {
+/**
+ * Partial update logic: Only apply fields that are explicitly provided in the 'raw' object.
+ * This preserves metadata (name, tokens) during location-only updates.
+ */
+function applySmartUpdate(old = {}, raw = {}, updateLastSeen = true) {
+    const d = { ...old };
     const id = normalizeId(raw.device_id || raw.deviceId);
     if (!id) return null;
 
-    const d = {
-        device_id: id,
-        name: raw.name ?? "",
-        lat: Number(raw.lat ?? 0),
-        lon: Number(raw.lon ?? 0),
-        alarm_active: bool(raw.alarm_active ?? raw.alarmActive),
-        is_locked: bool(raw.is_locked ?? raw.isLocked),
-        is_watched: bool(raw.is_watched ?? raw.isWatched),
-        fcm_token: raw.fcm_token ?? raw.fcmToken ?? "",
-        geofence_event: raw.geofence_event ?? raw.geofenceEvent ?? "",
-        motion_state: raw.motion_state ?? raw.motionState ?? "STILL",
-        offline: bool(raw.offline),
-        status: raw.status ?? "online",
-        watcher_name: raw.watcher_name ?? raw.watcherName ?? "",
-        is_awake: bool(raw.is_awake ?? raw.isAwake ?? true),
-        point_id: raw.point_id ?? raw.pointId ?? "",
-        intermediate_coords: Array.isArray(raw.intermediate_coords) ? raw.intermediate_coords.map(Number)
-            : Array.isArray(raw.intermediatePoints) ? raw.intermediatePoints.map(Number) : []
-    };
+    d.device_id = id;
+    if (raw.name !== undefined) d.name = raw.name;
+    if (raw.lat !== undefined) d.lat = Number(raw.lat);
+    if (raw.lon !== undefined) d.lon = Number(raw.lon);
 
-    if (hasValue(raw.battery)) d.battery = Math.round(Number(raw.battery));
-    if (hasValue(raw.speed)) d.speed = Number(raw.speed);
-    if (hasValue(raw.bearing)) d.bearing = Number(raw.bearing);
-    if (hasValue(raw.accuracy)) d.accuracy = Number(raw.accuracy);
-    if (hasValue(raw.sats)) d.sats = Math.round(Number(raw.sats));
-    if (hasValue(raw.temperature)) d.temperature = Number(raw.temperature);
+    // Optional Booleans
+    if (raw.alarm_active !== undefined) d.alarm_active = robustBool(raw.alarm_active);
+    else if (raw.alarmActive !== undefined) d.alarm_active = robustBool(raw.alarmActive);
+
+    if (raw.is_locked !== undefined) d.is_locked = robustBool(raw.is_locked);
+    else if (raw.isLocked !== undefined) d.is_locked = robustBool(raw.isLocked);
+
+    if (raw.is_watched !== undefined) d.is_watched = robustBool(raw.is_watched);
+    else if (raw.isWatched !== undefined) d.is_watched = robustBool(raw.isWatched);
+
+    if (raw.offline !== undefined) d.offline = robustBool(raw.offline);
+
+    if (raw.is_awake !== undefined) d.is_awake = robustBool(raw.is_awake);
+    else if (raw.isAwake !== undefined) d.is_awake = robustBool(raw.isAwake);
+
+    // Strings
+    const fcm = raw.fcm_token ?? raw.fcmToken;
+    if (fcm !== undefined) d.fcm_token = fcm;
+
+    const gf = raw.geofence_event ?? raw.geofenceEvent;
+    if (gf !== undefined) d.geofence_event = gf;
+
+    const motion = raw.motion_state ?? raw.motionState;
+    if (motion !== undefined) d.motion_state = motion;
+
+    if (raw.status !== undefined) d.status = raw.status;
+
+    const watcher = raw.watcher_name ?? raw.watcherName;
+    if (watcher !== undefined) d.watcher_name = watcher;
+
+    const point = raw.point_id ?? raw.pointId;
+    if (point !== undefined) d.point_id = point;
+
+    // Numbers
+    if (raw.battery !== undefined) d.battery = Math.round(Number(raw.battery));
+    if (raw.speed !== undefined) d.speed = Number(raw.speed);
+    if (raw.bearing !== undefined) d.bearing = Number(raw.bearing);
+    if (raw.accuracy !== undefined) d.accuracy = Number(raw.accuracy);
+    if (raw.sats !== undefined) d.sats = Math.round(Number(raw.sats));
+    if (raw.temperature !== undefined) d.temperature = Number(raw.temperature);
+    if (raw.color !== undefined) d.color = Math.round(Number(raw.color));
+    if (raw.timestamp !== undefined) d.timestamp = Number(raw.timestamp);
 
     const vLat = raw.visual_lat ?? raw.visualLat;
     const vLon = raw.visual_lon ?? raw.visualLon;
-    if (hasValue(vLat)) d.visual_lat = Number(vLat);
-    if (hasValue(vLon)) d.visual_lon = Number(vLon);
+    if (vLat !== undefined) d.visual_lat = Number(vLat);
+    if (vLon !== undefined) d.visual_lon = Number(vLon);
 
-    if (hasValue(raw.color)) d.color = Math.round(Number(raw.color));
-    if (hasValue(raw.timestamp)) d.timestamp = Number(raw.timestamp);
+    const coords = raw.intermediate_coords || raw.intermediatePoints;
+    if (Array.isArray(coords)) d.intermediate_coords = coords.map(Number);
+
+    if (updateLastSeen) d.lastSeen = Date.now();
 
     return d;
 }
@@ -158,23 +194,17 @@ function pushUpdate(device, signal = null) {
     }
 }
 
-async function updateDevice(id, rawData) {
-    const normalized = normalizeToSchema(rawData);
-    if (!normalized) return null;
-    const old = devices[id] || {};
-    devices[id] = { ...old, ...normalized, lastSeen: Date.now() };
-    return devices[id];
-}
-
 async function sendFcm(targetId, payload) {
+    if (!firebaseReady) return;
     const dev = devices[targetId];
     if (!dev?.fcm_token) return;
     try {
-        const data = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, String(v ?? '')]));
-        await admin.messaging().send({ token: dev.fcm_token, data, android: { priority: 'high' } });
+        const stringData = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, String(v ?? '')]));
+        await admin.messaging().send({ token: dev.fcm_token, data: stringData, android: { priority: 'high' } });
     } catch (e) { console.error(`FCM Failed for ${targetId}:`, e.message); }
 }
 
+// --- APP & STORAGE ---
 const storage = multer.diskStorage({
     destination: TELEMETRY_DIR,
     filename: (req, file, cb) => {
@@ -189,7 +219,7 @@ app.use(cors());
 app.use(compression());
 
 app.use((req, res, next) => {
-    if (req.path === '/' || req.path.startsWith('/socket.io') || req.path.startsWith('/v1/telemetry/download')) return next();
+    if (req.path === '/' || req.path.startsWith('/socket.io')) return next();
     if ((req.headers['x-api-key'] || "").trim() !== API_KEY) return res.sendStatus(401);
     next();
 });
@@ -207,8 +237,8 @@ app.post('/v1/location', bodyParser.raw({ type: 'application/x-protobuf', limit:
         if (Buffer.isBuffer(raw)) raw = LocationUpdateProto.toObject(LocationUpdateProto.decode(raw), { defaults: false, longs: Number });
         const id = normalizeId(raw.device_id || raw.deviceId);
         if (id) {
-            const dev = await updateDevice(id, raw);
-            if (dev) { pushUpdate(dev); await saveDevices(); }
+            const updated = applySmartUpdate(devices[id] || {}, raw);
+            if (updated) { devices[id] = updated; pushUpdate(updated); await saveDevices(); }
             res.sendStatus(200);
         } else res.sendStatus(400);
     } catch(e){ res.sendStatus(400); }
@@ -218,13 +248,16 @@ app.post('/v1/location/batch', bodyParser.raw({ type: 'application/x-protobuf', 
     try {
         const decoded = LocationBatchProto.decode(req.body);
         const batch = LocationBatchProto.toObject(decoded, { defaults: false, longs: Number });
+        let changed = false;
         if (batch.updates) {
-            let lastDev = null;
             for (const up of batch.updates) {
-                const id = normalizeId(up.device_id || up.deviceId);
-                if (id) lastDev = await updateDevice(id, up);
+                const id = normalizeId(up.device_id);
+                if (id) {
+                    const updated = applySmartUpdate(devices[id] || {}, up);
+                    if (updated) { devices[id] = updated; pushUpdate(updated); changed = true; }
+                }
             }
-            if (lastDev) { pushUpdate(lastDev); await saveDevices(); }
+            if (changed) await saveDevices();
         }
         res.sendStatus(200);
     } catch(e){ res.sendStatus(400); }
@@ -235,19 +268,11 @@ app.post('/v1/devices/:id/alarm', async (req, res) => {
     if (id && devices[id]) {
         const active = req.query.active === 'true';
         if (devices[id].alarm_active !== active) {
-            devices[id].alarm_active = active;
-            pushUpdate(devices[id]);
-
-            // Siren to target
+            devices[id].alarm_active = active; pushUpdate(devices[id]);
             await sendFcm(id, { type: active ? 'alarm' : 'stop_alarm', deviceId: id, message: active ? "Alarm!" : "Stop" });
-
-            // Notification to others
             if (active) {
-                const notifyPayload = {
-                    type: 'remote_alarm_start', deviceId: id, name: devices[id].name || "Gerät",
-                    title: "ALARM AUSGELÖST!", message: `${devices[id].name || id} hat einen Alarm!`
-                };
-                Object.values(devices).forEach(t => { if(t.fcm_token && t.device_id !== id) sendFcm(t.device_id, notifyPayload); });
+                const notify = { type: 'remote_alarm_start', deviceId: id, name: devices[id].name || "Gerät", title: "ALARM!", message: `${devices[id].name || id} hat einen Alarm!` };
+                Object.values(devices).forEach(t => { if(t.fcm_token && t.device_id !== id) sendFcm(t.device_id, notify); });
             }
             await saveDevices();
         }
@@ -293,8 +318,9 @@ app.post('/v1/devices/:id/unwatch', async (req, res) => {
 
 app.post('/v1/telemetry/upload', upload.single('file'), (req, res) => res.sendStatus(200));
 app.get('/v1/telemetry/download/:id', async (req, res) => {
+    const id = normalizeId(req.params.id);
     const files = await fs.readdir(TELEMETRY_DIR);
-    const target = files.sort().reverse().find(f => f.includes(`telemetry_${normalizeId(req.params.id)}`));
+    const target = files.filter(f => f.startsWith(`telemetry_${id}_`)).sort().reverse()[0];
     if (target) res.sendFile(path.join(TELEMETRY_DIR, target));
     else res.sendStatus(404);
 });
@@ -327,12 +353,18 @@ grpcServer.addService(trackingProto.TrackingService.service, {
         cb(null, { devices: Object.values(devices).map(d => DeviceLocationProto.create(d)) });
     },
     TrackLocation: (call) => {
-        if (call.metadata.get('x-api-key')?.[0] !== API_KEY) return call.end();
+        if (call.metadata.get('x-api-key')?.[0] !== API_KEY) {
+            call.destroy({ code: grpc.status.UNAUTHENTICATED, details: 'Invalid API key' });
+            return;
+        }
         const sid = crypto.randomUUID(); grpcStreams.set(sid, call);
         call.on('data', async (ev) => {
             const up = ev.location_update; if (!up) return;
-            const id = normalizeId(up.device_id || up.deviceId);
-            if (id) { const dev = await updateDevice(id, up); if (dev) { pushUpdate(dev); await saveDevices(); } }
+            const id = normalizeId(up.device_id);
+            if (id) {
+                const updated = applySmartUpdate(devices[id] || {}, up);
+                if (updated) { devices[id] = updated; pushUpdate(updated); await saveDevices(); }
+            }
         });
         call.on('end', () => grpcStreams.delete(sid));
         call.on('error', () => grpcStreams.delete(sid));
@@ -342,7 +374,11 @@ grpcServer.addService(trackingProto.TrackingService.service, {
 async function initFirebase() {
     try {
         const envKey = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.firebase_service_account;
-        if (envKey) admin.initializeApp({ credential: admin.credential.cert(JSON.parse(envKey)) });
+        if (envKey) {
+            admin.initializeApp({ credential: admin.credential.cert(JSON.parse(envKey)) });
+            firebaseReady = true;
+            console.log("🔥 Firebase initialized.");
+        } else console.warn("⚠️ Firebase Service Account missing.");
     } catch(e){ console.error("❌ Firebase Failed:", e.message); }
 }
 
@@ -353,16 +389,14 @@ async function start() {
         for (const [key, raw] of Object.entries(stored)) {
             const id = normalizeId(raw.device_id || raw.deviceId || key);
             if (!id) continue;
-            const normalized = normalizeToSchema(raw);
+            const normalized = applySmartUpdate({}, raw, false);
             if (normalized) migrated[id] = { ...normalized, lastSeen: raw.lastSeen || Date.now() };
         }
         devices = migrated;
         await saveDevices();
         console.log(`📦 Loaded and migrated ${Object.keys(devices).length} devices.`);
     } catch(e){ devices = {}; }
-
     try { geofences = JSON.parse(await fs.readFile(GEOFENCE_FILE, 'utf8')); } catch(e){ geofences = {}; }
-
     await initFirebase();
     server.listen(PORT, () => console.log(`🚀 Port ${PORT}`));
     grpcServer.bindAsync(`0.0.0.0:${GRPC_PORT}`, grpc.ServerCredentials.createInsecure(), (err, port) => {
