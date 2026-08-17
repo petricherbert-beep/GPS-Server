@@ -180,9 +180,18 @@ app.post('/v1/devices/:id/alarm', async (req, res) => {
         const active = req.query.active === 'true';
         if (devices[id].alarmActive !== active) {
             devices[id].alarmActive = active; pushUpdate(devices[id]);
-            const p = { type: active ? 'alarm' : 'stop_alarm', deviceId: id, message: active ? "Alarm!" : "Stop" };
-            sendFcm(id, p);
-            Object.values(devices).forEach(t => { if(t.fcmToken && t.deviceId !== id) sendFcm(t.deviceId, p); });
+
+            // Siren payload for the target
+            const sirenPayload = { type: active ? 'alarm' : 'stop_alarm', deviceId: id, message: active ? "Alarm!" : "Stop" };
+            sendFcm(id, sirenPayload);
+
+            // Notification payload for others
+            if (active) {
+                const notifyPayload = { type: 'remote_alarm_start', deviceId: id, name: devices[id].name || "Gerät", title: "ALARM AUSGELÖST!", message: `${devices[id].name || id} hat einen Alarm!` };
+                Object.values(devices).forEach(t => {
+                    if(t.fcmToken && normalizeId(t.deviceId) !== id) sendFcm(t.deviceId, notifyPayload);
+                });
+            }
         }
     }
     res.sendStatus(200);
